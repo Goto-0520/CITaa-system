@@ -22,12 +22,3 @@
 ## License
 
 MIT License
-```
-```
-5. GitHub Desktop に戻る
-
-6. Changes に README.md が表示される
-
-7. Summary: 「READMEを更新」と入力
-
-8. Commit to main → Push origin
