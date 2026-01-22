@@ -1,0 +1,220 @@
+/**
+ * Googleフォーム自動パスワード変更・メール送信システム
+ * (最終完成版：ID・URL完全自動取得、履歴記録なし)
+ */
+
+// ▼▼▼▼▼ 設定項目 ▼▼▼▼▼
+
+// 【！】このスクリプトはフォームに紐づいているため、FORM_IDは自動で取得されます。
+const FORM_ID = FormApp.getActiveForm().getId();
+
+// 通知したい団体のメールアドレスに書き換えてください
+const TEAM_EMAILS = {
+ '団体名': 'メールアドレス',
+};
+// ▲▲▲▲▲ 設定はここまで ▲▲▲▲▲
+
+
+/**
+ * メイン実行関数：パスワードを変更してメール送信
+ */
+function changePasswordAndSendEmails() {
+  try {
+    console.log('パスワード変更処理開始...');
+    
+    // 新しいパスワードを生成
+    const newPassword = generatePassword();
+    console.log(`新しいパスワード: ${newPassword}`);
+    
+    // フォームのパスワードを更新
+    const updateSuccess = updateFormPassword(newPassword);
+    
+    if (!updateSuccess) {
+      throw new Error('フォームのパスワード質問が見つからず、更新に失敗しました');
+    }
+    
+    // 関係団体にメール送信
+    console.log('関係団体へのメール送信開始...');
+    const emailResult = sendPasswordChangeEmails(newPassword);
+    
+    // 管理者に完了通知
+    sendAdminNotification(newPassword, emailResult);
+    
+    console.log('パスワード変更・メール送信処理が完了しました');
+    
+  } catch (error) {
+    console.error('パスワード変更処理中にエラーが発生しました:', error);
+    // 管理者にエラー通知
+    sendErrorNotification(error);
+  }
+}
+
+/**
+ * 5桁のランダムパスワードを生成
+ */
+function generatePassword() {
+  const chars = 'ABCDEFGHJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789';
+  let password = '';
+  for (let i = 0; i < 5; i++) {
+    password += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return password;
+}
+
+/**
+ * Googleフォームのパスワード質問を更新
+ */
+function updateFormPassword(newPassword) {
+  try {
+    const form = FormApp.getActiveForm(); // 紐付いたフォームを直接操作
+    const items = form.getItems(FormApp.ItemType.TEXT);
+    
+    for (const item of items) {
+      const textItem = item.asTextItem();
+      if (textItem.getTitle().includes('パスワード')) {
+        const validation = FormApp.createTextValidation()
+          .requireTextMatchesPattern(newPassword)
+          .setHelpText('パスワードが違います。正しいパスワードを入力してください。')
+          .build();
+        textItem.setValidation(validation);
+        console.log(`パスワード質問を更新しました: ${newPassword}`);
+        return true;
+      }
+    }
+    
+    console.log('パスワード質問が見つかりませんでした');
+    return false;
+    
+  } catch (error) {
+    console.error('フォーム更新エラー:', error);
+    throw error;
+  }
+}
+
+/**
+ * 関係団体にパスワード変更メールを送信
+ */
+function sendPasswordChangeEmails(newPassword) {
+  const form = FormApp.getActiveForm();
+  const formLink = form.getPublishedUrl(); // フォームのURLを自動取得
+  const subject = `【パスワード変更通知】${form.getTitle()}`;
+  let successCount = 0;
+  let failureCount = 0;
+  
+  for (const [teamName, email] of Object.entries(TEAM_EMAILS)) {
+    try {
+      const emailBody = createEmailBody(teamName, newPassword, formLink);
+      MailApp.sendEmail({ to: email, subject: subject, body: emailBody });
+      successCount++;
+      console.log(`${teamName} (${email}) にメール送信完了`);
+      Utilities.sleep(1000); // 1秒待機
+    } catch (error) {
+      failureCount++;
+      console.error(`${teamName} (${email}) へのメール送信エラー:`, error);
+    }
+  }
+  
+  console.log(`メール送信完了: 成功 ${successCount}件, 失敗 ${failureCount}件`);
+  return { success: successCount, failure: failureCount };
+}
+
+/**
+ * メール本文を作成
+ */
+function createEmailBody(teamName, newPassword, formLink) {
+  return `${teamName}御中
+
+お疲れ様です。
+千葉工業大学体育会本部編集部長です。
+
+表題の件について、パスワードが以下のとおり
+変更となったことご報告いたします。
+新パスワード：${newPassword}
+
+また、以下が入部者フォームのリンクとなります。
+入部者フォームリンク：
+${formLink}
+
+何かご不明点等ございましたら
+ご連絡ください。
+
+以上、よろしくお願いいたします。
+***********************************************
+千葉工業大学　体育会本部
+TEL：047-478-0251
+e-mail：cit.taiiku@gmail.com
+HP：https://sites.google.com/view/cittaiiku2021hp
+***********************************************`;
+}
+
+/**
+ * 管理者に完了通知メールを送信
+ */
+function sendAdminNotification(newPassword, emailResult) {
+  const adminEmail = 'cit.taiiku@gmail.com'; // 管理者のメールアドレス
+  const subject = '【自動実行完了】入部者フォーム パスワード変更処理';
+  const body = `パスワード変更処理が完了しました。
+
+実行日時: ${new Date().toLocaleString('ja-JP')}
+対象フォーム: ${FormApp.getActiveForm().getTitle()}
+新パスワード: ${newPassword}
+
+メール送信結果:
+- 成功: ${emailResult.success}件
+- 失敗: ${emailResult.failure}件
+
+このメールは自動送信されています。`;
+  
+  try {
+    MailApp.sendEmail(adminEmail, subject, body);
+    console.log('管理者に完了通知を送信しました');
+  } catch (error) {
+    console.error('管理者への完了通知メール送信エラー:', error);
+  }
+}
+
+/**
+ * 管理者にエラー通知メールを送信
+ */
+function sendErrorNotification(error) {
+  const adminEmail = 'cit.taiiku@gmail.com'; // 管理者のメールアドレス
+  const subject = '【エラー発生】入部者フォーム パスワード変更処理';
+  const body = `パスワード変更処理でエラーが発生しました。
+
+実行日時: ${new Date().toLocaleString('ja-JP')}
+対象フォーム: ${FormApp.getActiveForm().getTitle()}
+エラー内容: ${error.toString()}
+
+手動での確認・対応をお願いします。
+
+このメールは自動送信されています。`;
+
+  try {
+    MailApp.sendEmail(adminEmail, subject, body);
+    console.log('管理者にエラー通知を送信しました');
+  } catch (mailError) {
+    console.error('管理者へのエラー通知メール送信に失敗:', mailError);
+  }
+}
+
+/**
+ * 毎月1日実行用のトリガーを設定
+ */
+function setupMonthlyTrigger() {
+  // 既存の同じ名前のトリガーがあれば削除
+  const triggers = ScriptApp.getProjectTriggers();
+  for (const trigger of triggers) {
+    if (trigger.getHandlerFunction() === 'changePasswordAndSendEmails') {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  }
+  
+  // 毎月1日午前9時に実行するトリガーを新規作成
+  ScriptApp.newTrigger('changePasswordAndSendEmails')
+    .timeBased()
+    .onMonthDay(1)
+    .atHour(9)
+    .create();
+    
+  console.log('月次トリガーを設定しました（毎月1日 午前9時）');
+}

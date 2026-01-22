@@ -1,0 +1,1329 @@
+// 📌 団体名設定（ここだけ変更すればOK）
+const CLUB_NAME = '合気道部';
+
+// 📌 最終版：OCR失敗時もメール送信 + 重複者専用メッセージ + 処理済みスキップ
+function onFormSubmit(e) {
+  try {
+    console.log('=== フォーム送信処理開始 ===');
+    
+    const sheet = SpreadsheetApp.getActiveSheet();
+    const lastRow = sheet.getLastRow();
+    
+    console.log('処理対象行:', lastRow);
+    
+    // データ取得
+    const newRowData = sheet.getRange(lastRow, 1, 1, 11).getValues()[0];
+    const newEmail = newRowData[1];        // B列: メールアドレス
+    const newClub = CLUB_NAME;             // 団体名（定数から取得）
+    const newStudentId = newRowData[4];    // E列: 学生番号
+    const newName = newRowData[5];         // F列: 氏名
+    const studentCardUrl = newRowData[9];  // J列: 学生証画像URL
+    
+    console.log('取得データ:', {
+      email: newEmail,
+      club: newClub,
+      studentId: newStudentId,
+      name: newName,
+      imageUrl: studentCardUrl ? '画像あり' : '画像なし'
+    });
+    
+    let hasValidationError = false;
+    let validationResults = [];
+    let ocrFailed = false;
+    
+    // 🔍 学生証のDrive OCR処理
+    let ocrStudentId = null;
+    if (studentCardUrl && studentCardUrl.trim() !== '') {
+      console.log('Drive OCR処理開始...');
+      
+      const fileReady = waitForFileReady(studentCardUrl, 3);
+      if (!fileReady) {
+        console.warn('⚠️ ファイルの準備が確認できませんでした');
+      }
+      
+      ocrStudentId = processStudentCardWithRetry(studentCardUrl);
+      
+      if (ocrStudentId) {
+        console.log('✅ OCR成功 - 学生番号:', ocrStudentId);
+        sheet.getRange(lastRow, 11).setValue(ocrStudentId);
+        
+        const consistencyResult = checkStudentIdConsistencyAlpha(newStudentId, ocrStudentId);
+        if (!consistencyResult.isConsistent) {
+          console.log('⚠️ 学生番号不一致 - K列を赤文字にしてメール送信します');
+          sheet.getRange(lastRow, 11).setFontColor('#FF0000');
+          validationResults.push('学生番号不一致（K列を赤文字で記録・メール送信）');
+        }
+      } else {
+        console.log('❌ OCR処理失敗 - メール送信は実行します');
+        sheet.getRange(lastRow, 11)
+          .setValue('OCR処理失敗')
+          .setFontColor('#FF0000');
+        ocrFailed = true;
+        validationResults.push('学生番号OCR処理失敗（メール送信は実行）');
+      }
+    } else {
+      console.log('ℹ️ 学生証画像なし - OCR処理をスキップ');
+      validationResults.push('学生証画像が提供されていません');
+    }
+    
+    // 📧 メールアドレス検証
+    const emailValidation = checkEmailContainsStudentIdImproved(newEmail, newStudentId);
+    if (!emailValidation.isValid) {
+      console.log('⚠️ メール検証エラー:', emailValidation.reason);
+      sheet.getRange(lastRow, 1, 1, 11).setBackground('#ffff99');
+      hasValidationError = true;
+      validationResults.push('メール検証エラー: ' + emailValidation.reason);
+    } else {
+      console.log('✅ メール検証OK:', emailValidation.reason);
+    }
+    
+    // 🔍 重複チェック
+    const duplicateCheck = checkDuplicatesAndColor(sheet, newClub, newName, lastRow);
+    
+    // 📤 メール送信判定
+    if (duplicateCheck.hasDuplicates) {
+      // 重複者には専用メッセージ送信
+      console.log('⚠️ 重複検出 - 専用メッセージ送信');
+      const mailResult = sendDuplicateEmail(newClub, newEmail, newStudentId, newName);
+      if (mailResult.success) {
+        console.log('✅ 重複者メール送信成功');
+        sheet.getRange(lastRow, 1, 1, 11).setBackground('#FF0000');
+      } else {
+        console.log('❌ 重複者メール送信失敗:', mailResult.error);
+        sheet.getRange(lastRow, 1, 1, 11).setBackground('#DDA0DD');
+      }
+    } else if (!hasValidationError || ocrFailed) {
+      // 通常メール送信（OCR失敗時も送信）
+      console.log('✅ メール送信開始（検証OK または OCR失敗のみ）');
+      const mailResult = sendPersonalEmail(newClub, newEmail, newStudentId, newName);
+      if (mailResult.success) {
+        console.log('✅ メール送信成功');
+        sheet.getRange(lastRow, 1, 1, 11).setBackground('#90EE90');
+      } else {
+        console.log('❌ メール送信失敗:', mailResult.error);
+        sheet.getRange(lastRow, 1, 1, 11).setBackground('#DDA0DD');
+      }
+    } else {
+      console.log('⚠️ 検証エラーあり - メール送信をスキップ:', validationResults);
+    }
+    
+    console.log('=== フォーム送信処理完了 ===');
+    
+  } catch (error) {
+    console.error('❌ メイン処理でエラー発生:', error);
+    try {
+      const sheet = SpreadsheetApp.getActiveSheet();
+      const lastRow = sheet.getLastRow();
+      sheet.getRange(lastRow, 1, 1, 11).setBackground('#FF6B6B');
+    } catch (colorError) {
+      console.error('❌ エラー表示処理でも失敗:', colorError);
+    }
+  }
+}
+
+// ========================================
+// 手動操作機能1: 選択行を完全再処理（処理済みスキップ対応）
+// ========================================
+
+function processSelectedRow() {
+  try {
+    const sheet = SpreadsheetApp.getActiveSheet();
+    const activeRange = sheet.getActiveRange();
+    const startRow = activeRange.getRow();
+    const numRows = activeRange.getNumRows();
+    
+    if (startRow === 1) {
+      Browser.msgBox('警告', 'ヘッダー行は選択できません。', Browser.Buttons.OK);
+      return;
+    }
+    
+    // 処理対象行のリスト作成（処理済みスキップ）
+    const targetRows = [];
+    const skippedRows = [];
+    
+    for (let i = 0; i < numRows; i++) {
+      const row = startRow + i;
+      if (row > 1) {
+        const bgColor = sheet.getRange(row, 1).getBackground();
+        if (bgColor === '#90ee90') { // 薄緑色は処理済み
+          skippedRows.push(row);
+          console.log(`行${row}: 処理済み（薄緑色）のためスキップ`);
+        } else {
+          targetRows.push(row);
+        }
+      }
+    }
+    
+    if (targetRows.length === 0) {
+      const message = skippedRows.length > 0 
+        ? `すべて処理済みです。\n\nスキップした行: ${skippedRows.length}件`
+        : '処理対象の行がありません。';
+      Browser.msgBox('情報', message, Browser.Buttons.OK);
+      return;
+    }
+    
+    console.log(`=== ${targetRows.length}行の一括再処理開始 ===`);
+    console.log('処理対象行:', targetRows);
+    console.log('スキップした行:', skippedRows);
+    
+    let successCount = 0;
+    let errorCount = 0;
+    const results = [];
+    
+    // 各行を処理
+    for (let i = 0; i < targetRows.length; i++) {
+      const row = targetRows[i];
+      
+      try {
+        console.log(`\n--- 行${row}の処理開始 (${i + 1}/${targetRows.length}) ---`);
+        
+        const rowData = sheet.getRange(row, 1, 1, 11).getValues()[0];
+        const email = rowData[1];
+        const club = CLUB_NAME;
+        const studentId = rowData[4];
+        const name = rowData[5];
+        const studentCardUrl = rowData[9];
+        
+        console.log(`氏名: ${name}, 学籍番号: ${studentId}`);
+        
+        if (!email || !email.trim() || !studentId || !name) {
+          console.log('❌ 必須情報不足 - スキップ');
+          sheet.getRange(row, 1, 1, 11).setBackground('#FF6B6B');
+          results.push(`行${row}: スキップ（必須情報不足）`);
+          errorCount++;
+          continue;
+        }
+        
+        // 処理中の表示
+        sheet.getRange(row, 1, 1, 11).setBackground('#E0E0E0');
+        SpreadsheetApp.flush();
+        
+        let hasValidationError = false;
+        let validationResults = [];
+        let ocrFailed = false;
+        
+        // 🔍 OCR処理
+        let ocrStudentId = null;
+        if (studentCardUrl && studentCardUrl.trim() !== '') {
+          console.log('OCR処理開始...');
+          
+          const fileReady = waitForFileReady(studentCardUrl, 3);
+          if (!fileReady) {
+            console.warn('⚠️ ファイルの準備が確認できませんでした');
+          }
+          
+          ocrStudentId = processStudentCardWithRetry(studentCardUrl, 2);
+          
+          if (ocrStudentId) {
+            console.log(`✅ OCR成功: ${ocrStudentId}`);
+            sheet.getRange(row, 11).setValue(ocrStudentId);
+            
+            const consistencyResult = checkStudentIdConsistencyAlpha(studentId, ocrStudentId);
+            if (!consistencyResult.isConsistent) {
+              console.log('⚠️ 学生番号不一致 - K列を赤文字化');
+              sheet.getRange(row, 11).setFontColor('#FF0000');
+              validationResults.push('学生番号不一致');
+            }
+          } else {
+            console.log('❌ OCR処理失敗 - メール送信は実行');
+            sheet.getRange(row, 11)
+              .setValue('OCR処理失敗')
+              .setFontColor('#FF0000');
+            ocrFailed = true;
+            validationResults.push('OCR失敗');
+          }
+        }
+        
+        // 📧 メールアドレス検証
+        const emailValidation = checkEmailContainsStudentIdImproved(email, studentId);
+        if (!emailValidation.isValid) {
+          console.log('⚠️ メール検証エラー');
+          sheet.getRange(row, 1, 1, 11).setBackground('#ffff99');
+          hasValidationError = true;
+          validationResults.push('メール検証エラー');
+        }
+        
+        // 🔍 重複チェック
+        const duplicateCheck = checkDuplicatesAndColor(sheet, club, name, row);
+        
+        // 📤 メール送信判定
+        if (duplicateCheck.hasDuplicates) {
+          console.log('⚠️ 重複検出 - 専用メッセージ送信');
+          const mailResult = sendDuplicateEmail(club, email, studentId, name);
+          
+          if (mailResult.success) {
+            console.log('✅ 重複者メール送信成功');
+            sheet.getRange(row, 1, 1, 11).setBackground('#FF0000');
+            results.push(`行${row}: 重複者メール送信成功 (${name})`);
+            successCount++;
+          } else {
+            console.log('❌ 重複者メール送信失敗');
+            sheet.getRange(row, 1, 1, 11).setBackground('#DDA0DD');
+            results.push(`行${row}: 重複者メール送信失敗 (${name})`);
+            errorCount++;
+          }
+        } else if (!hasValidationError || ocrFailed) {
+          console.log('メール送信開始');
+          const mailResult = sendPersonalEmail(club, email, studentId, name);
+          
+          if (mailResult.success) {
+            console.log('✅ メール送信成功');
+            sheet.getRange(row, 1, 1, 11).setBackground('#90EE90');
+            results.push(`行${row}: 成功 (${name})`);
+            successCount++;
+          } else {
+            console.log('❌ メール送信失敗');
+            sheet.getRange(row, 1, 1, 11).setBackground('#DDA0DD');
+            results.push(`行${row}: メール送信失敗 (${name})`);
+            errorCount++;
+          }
+        } else {
+          console.log('⚠️ 検証エラーあり - メール送信スキップ');
+          results.push(`行${row}: 検証エラー (${name}) - ${validationResults.join(', ')}`);
+          errorCount++;
+        }
+        
+      } catch (rowError) {
+        console.error(`❌ 行${row}処理エラー:`, rowError);
+        sheet.getRange(row, 1, 1, 11).setBackground('#FF6B6B');
+        results.push(`行${row}: エラー`);
+        errorCount++;
+      }
+    }
+    
+    console.log(`\n=== 一括処理完了 ===`);
+    console.log(`成功: ${successCount}件, エラー: ${errorCount}件, スキップ: ${skippedRows.length}件`);
+    
+    // 結果表示
+    const resultMessage = `処理完了\n\n` +
+      `選択: ${numRows}行\n` +
+      `処理済みスキップ: ${skippedRows.length}件\n` +
+      `処理対象: ${targetRows.length}行\n` +
+      `成功: ${successCount}件\n` +
+      `エラー: ${errorCount}件\n\n` +
+      `詳細:\n${results.join('\n')}`;
+    
+    Browser.msgBox('処理完了', resultMessage, Browser.Buttons.OK);
+    
+  } catch (error) {
+    console.error('❌ エラー:', error);
+    Browser.msgBox('エラー', error.toString(), Browser.Buttons.OK);
+  }
+}
+
+// ========================================
+// 手動操作機能2: 選択行をメール送信のみ（複数行対応・処理済みスキップ）
+// ========================================
+
+function sendEmailForSelectedRow() {
+  try {
+    const sheet = SpreadsheetApp.getActiveSheet();
+    const activeRange = sheet.getActiveRange();
+    const startRow = activeRange.getRow();
+    const numRows = activeRange.getNumRows();
+    
+    if (startRow === 1) {
+      Browser.msgBox('警告', 'ヘッダー行は選択できません。', Browser.Buttons.OK);
+      return;
+    }
+    
+    // 処理対象行のリスト作成（処理済みスキップ）
+    const targetRows = [];
+    const skippedRows = [];
+    
+    for (let i = 0; i < numRows; i++) {
+      const row = startRow + i;
+      if (row > 1) {
+        const bgColor = sheet.getRange(row, 1).getBackground();
+        if (bgColor === '#90ee90') {
+          skippedRows.push(row);
+          console.log(`行${row}: 処理済み（薄緑色）のためスキップ`);
+        } else {
+          targetRows.push(row);
+        }
+      }
+    }
+    
+    if (targetRows.length === 0) {
+      const message = skippedRows.length > 0 
+        ? `すべて処理済みです。\n\nスキップした行: ${skippedRows.length}件`
+        : '処理対象の行がありません。';
+      Browser.msgBox('情報', message, Browser.Buttons.OK);
+      return;
+    }
+    
+    console.log(`=== ${targetRows.length}行へのメール送信処理 ===`);
+    
+    // 確認ダイアログ
+    const ui = SpreadsheetApp.getUi();
+    const response = ui.alert(
+      'メール一括送信確認',
+      `以下の内容でメールを送信しますか？\n` +
+      `（検証処理はスキップされます）\n\n` +
+      `処理対象: ${targetRows.length}行\n` +
+      `処理済みスキップ: ${skippedRows.length}行`,
+      ui.ButtonSet.YES_NO
+    );
+    
+    if (response !== ui.Button.YES) {
+      console.log('メール送信がキャンセルされました');
+      return;
+    }
+    
+    let successCount = 0;
+    let errorCount = 0;
+    const results = [];
+    
+    // 各行を処理
+    for (let i = 0; i < targetRows.length; i++) {
+      const row = targetRows[i];
+      
+      try {
+        console.log(`\n--- 行${row}のメール送信 (${i + 1}/${targetRows.length}) ---`);
+        
+        const rowData = sheet.getRange(row, 1, 1, 11).getValues()[0];
+        const club = CLUB_NAME;
+        const email = rowData[1];
+        const studentId = rowData[4];
+        const name = rowData[5];
+        
+        console.log(`宛先: ${email}, 氏名: ${name}`);
+        
+        if (!email || !email.trim() || !studentId || !name) {
+          console.log('❌ 必須情報不足 - スキップ');
+          results.push(`行${row}: スキップ（必須情報不足）`);
+          errorCount++;
+          continue;
+        }
+        
+        // 送信中の表示
+        sheet.getRange(row, 1, 1, 11).setBackground('#E0E0E0');
+        SpreadsheetApp.flush();
+        
+        // 重複チェック
+        const duplicateCheck = checkDuplicatesAndColor(sheet, club, name, row);
+        
+        let mailResult;
+        if (duplicateCheck.hasDuplicates) {
+          console.log('⚠️ 重複検出 - 専用メッセージ送信');
+          mailResult = sendDuplicateEmail(club, email, studentId, name);
+          
+          if (mailResult.success) {
+            sheet.getRange(row, 1, 1, 11).setBackground('#FF0000');
+            results.push(`行${row}: 重複者メール送信成功 (${name})`);
+            successCount++;
+          } else {
+            sheet.getRange(row, 1, 1, 11).setBackground('#DDA0DD');
+            results.push(`行${row}: 重複者メール送信失敗 (${name})`);
+            errorCount++;
+          }
+        } else {
+          mailResult = sendPersonalEmail(club, email, studentId, name);
+          
+          if (mailResult.success) {
+            console.log('✅ メール送信成功');
+            sheet.getRange(row, 1, 1, 11).setBackground('#90EE90');
+            results.push(`行${row}: 成功 (${name})`);
+            successCount++;
+          } else {
+            console.log('❌ メール送信失敗');
+            sheet.getRange(row, 1, 1, 11).setBackground('#DDA0DD');
+            results.push(`行${row}: 失敗 (${name})`);
+            errorCount++;
+          }
+        }
+        
+      } catch (rowError) {
+        console.error(`❌ 行${row}エラー:`, rowError);
+        sheet.getRange(row, 1, 1, 11).setBackground('#FF6B6B');
+        results.push(`行${row}: エラー`);
+        errorCount++;
+      }
+    }
+    
+    console.log(`\n=== メール送信完了 ===`);
+    console.log(`成功: ${successCount}件, エラー: ${errorCount}件, スキップ: ${skippedRows.length}件`);
+    
+    // 結果表示
+    const resultMessage = `メール送信完了\n\n` +
+      `選択: ${numRows}行\n` +
+      `処理済みスキップ: ${skippedRows.length}件\n` +
+      `送信対象: ${targetRows.length}行\n` +
+      `成功: ${successCount}件\n` +
+      `エラー: ${errorCount}件\n\n` +
+      `詳細:\n${results.join('\n')}`;
+    
+    Browser.msgBox('送信完了', resultMessage, Browser.Buttons.OK);
+    
+  } catch (error) {
+    console.error('❌ エラー:', error);
+    Browser.msgBox('エラー', error.toString(), Browser.Buttons.OK);
+  }
+}
+
+// ========================================
+// カスタムメニュー設定
+// ========================================
+
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('🎓 学生証処理')
+    .addItem('🔄 選択行を再処理（処理済みスキップ）', 'processSelectedRow')
+    .addItem('📧 選択行をメール送信のみ（処理済みスキップ）', 'sendEmailForSelectedRow')
+    .addSeparator()
+    .addItem('🔧 システムセットアップ', 'setupCompleteSystem')
+    .addToUi();
+  
+  console.log('✅ カスタムメニューを追加しました');
+}
+
+// ========================================
+// システムセットアップ
+// ========================================
+
+function setupCompleteSystem() {
+  console.log('=== 最終版システムセットアップ開始 ===');
+  
+  try {
+    DriveApp.getRootFolder().getName();
+    console.log('✅ DriveApp権限 OK');
+    
+    const aboutInfo = Drive.About.get();
+    console.log('✅ Advanced Drive Service OK');
+    
+    const tempFolder = getOrCreateTempFolder();
+    console.log('✅ 一時フォルダ作成 OK');
+    
+    createFormSubmitTrigger();
+    console.log('✅ フォーム送信トリガー設定 OK');
+    
+    createCleanupTrigger();
+    console.log('✅ クリーンアップトリガー設定 OK');
+    
+    console.log('');
+    console.log('🎉 === セットアップ完了 === 🎉');
+    console.log(`✅ ${CLUB_NAME}用システムが正常に設定されました！`);
+    console.log('');
+    console.log('📋 機能一覧:');
+    console.log('1. ✅ OCR失敗時もメール送信（K列に赤文字で記録）');
+    console.log('2. ✅ 重複者には専用メッセージ送信');
+    console.log('3. ✅ 処理済み行（薄緑色）は自動スキップ');
+    console.log('4. ✅ 複数行の一括処理に対応');
+    console.log(`5. ✅ 団体名を「${CLUB_NAME}」で統一`);
+    
+    Browser.msgBox(
+      'セットアップ完了',
+      `✅ ${CLUB_NAME}用システムセットアップが完了しました！\n\n` +
+      '機能一覧:\n' +
+      '• OCR失敗時もメール送信\n' +
+      '• 重複者には専用メッセージ\n' +
+      '• 処理済み行は自動スキップ\n' +
+      '• 複数行の一括処理対応\n' +
+      `• 団体名「${CLUB_NAME}」で統一`,
+      Browser.Buttons.OK
+    );
+    
+    return true;
+    
+  } catch (error) {
+    console.error('❌ セットアップエラー:', error.toString());
+    
+    if (error.toString().includes('Drive')) {
+      console.error('🔧 対処法:');
+      console.error('1. Apps Scriptエディタの左サイドバー「サービス」をクリック');
+      console.error('2. 「+」ボタンで「Drive API」を追加');
+      console.error('3. 識別子は「Drive」のまま保存');
+      
+      Browser.msgBox(
+        'セットアップエラー',
+        '❌ Drive APIの設定が必要です。\n\n' +
+        '対処法:\n' +
+        '1. 左サイドバー「サービス」をクリック\n' +
+        '2. 「+」ボタンで「Drive API」を追加\n' +
+        '3. 識別子は「Drive」のまま保存\n' +
+        '4. 再度セットアップを実行',
+        Browser.Buttons.OK
+      );
+    }
+    
+    return false;
+  }
+}
+
+function createFormSubmitTrigger() {
+  try {
+    const triggers = ScriptApp.getProjectTriggers();
+    triggers.forEach(trigger => {
+      if (trigger.getHandlerFunction() === 'onFormSubmit') {
+        ScriptApp.deleteTrigger(trigger);
+      }
+    });
+    
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    ScriptApp.newTrigger('onFormSubmit')
+      .forSpreadsheet(ss)
+      .onFormSubmit()
+      .create();
+    
+    console.log('✅ フォーム送信トリガーを作成しました');
+    return true;
+    
+  } catch (error) {
+    console.error('❌ トリガー作成エラー:', error);
+    return false;
+  }
+}
+
+function createCleanupTrigger() {
+  try {
+    const triggers = ScriptApp.getProjectTriggers();
+    triggers.forEach(trigger => {
+      if (trigger.getHandlerFunction() === 'cleanupTempFolder') {
+        ScriptApp.deleteTrigger(trigger);
+      }
+    });
+    
+    ScriptApp.newTrigger('cleanupTempFolder')
+      .timeBased()
+      .everyDays(1)
+      .atHour(2)
+      .create();
+    
+    console.log('✅ 定期クリーンアップトリガーを作成しました（毎日午前2時）');
+    return true;
+    
+  } catch (error) {
+    console.error('❌ クリーンアップトリガー作成エラー:', error);
+    return false;
+  }
+}
+
+function cleanupTempFolder() {
+  try {
+    console.log('=== 一時フォルダクリーンアップ開始 ===');
+    
+    const folderName = 'OCR_Temp_' + new Date().getFullYear();
+    const folders = DriveApp.getFoldersByName(folderName);
+    
+    if (!folders.hasNext()) {
+      console.log('ℹ️ クリーンアップ対象フォルダが見つかりません');
+      return;
+    }
+    
+    const folder = folders.next();
+    const files = folder.getFiles();
+    let deletedCount = 0;
+    
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    
+    while (files.hasNext()) {
+      const file = files.next();
+      const fileDate = file.getDateCreated();
+      
+      if (fileDate < oneHourAgo) {
+        try {
+          file.setTrashed(true);
+          deletedCount++;
+          console.log('削除:', file.getName());
+        } catch (deleteError) {
+          console.warn('削除失敗:', file.getName());
+        }
+      }
+    }
+    
+    console.log(`✅ クリーンアップ完了: ${deletedCount}個のファイルを削除`);
+    
+  } catch (error) {
+    console.error('❌ クリーンアップエラー:', error);
+  }
+}
+
+// ========================================
+// ファイル待機処理
+// ========================================
+
+function waitForFileReady(imageUrl, maxRetries = 3) {
+  const fileId = extractFileIdFromUrl(imageUrl);
+  if (!fileId) {
+    console.error('❌ ファイルID抽出失敗');
+    return false;
+  }
+  
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`ファイルアクセス試行 ${attempt}/${maxRetries}...`);
+      
+      const file = DriveApp.getFileById(fileId);
+      const fileName = file.getName();
+      const fileSize = file.getSize();
+      
+      console.log(`✅ ファイルアクセス成功: ${fileName} (${fileSize} bytes)`);
+      
+      if (fileSize > 0) {
+        return true;
+      } else {
+        console.warn(`⚠️ ファイルサイズが0 - 再試行します (${attempt}/${maxRetries})`);
+      }
+      
+    } catch (error) {
+      console.warn(`⚠️ ファイルアクセス失敗 (試行 ${attempt}/${maxRetries}):`, error.toString());
+      
+      if (attempt < maxRetries) {
+        const waitTime = attempt * 2000;
+        console.log(`⏳ ${waitTime/1000}秒待機してから再試行...`);
+        Utilities.sleep(waitTime);
+      }
+    }
+  }
+  
+  console.error('❌ ファイルアクセス最終失敗');
+  return false;
+}
+
+function processStudentCardWithRetry(imageUrl, maxRetries = 2) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      console.log(`OCR処理試行 ${attempt}/${maxRetries}...`);
+      
+      const result = processStudentCardDriveOCR_StudentIdOnly(imageUrl);
+      
+      if (result) {
+        console.log(`✅ OCR成功 (試行 ${attempt}/${maxRetries}):`, result);
+        return result;
+      } else {
+        console.warn(`⚠️ OCR結果なし (試行 ${attempt}/${maxRetries})`);
+        
+        if (attempt < maxRetries) {
+          const waitTime = 3000;
+          console.log(`⏳ ${waitTime/1000}秒待機してから再試行...`);
+          Utilities.sleep(waitTime);
+        }
+      }
+      
+    } catch (error) {
+      console.error(`❌ OCR処理エラー (試行 ${attempt}/${maxRetries}):`, error);
+      
+      if (attempt < maxRetries) {
+        const waitTime = 3000;
+        console.log(`⏳ ${waitTime/1000}秒待機してから再試行...`);
+        Utilities.sleep(waitTime);
+      }
+    }
+  }
+  
+  console.error('❌ OCR処理最終失敗（全リトライ終了）');
+  return null;
+}
+
+// ========================================
+// メールアドレス検証（大文字小文字無視）
+// ========================================
+
+function checkEmailContainsStudentIdImproved(email, studentId) {
+  try {
+    if (!email || !studentId) {
+      return {
+        isValid: false,
+        reason: 'メールアドレスまたは学籍番号が空です'
+      };
+    }
+    
+    const emailLower = email.toString().toLowerCase().trim();
+    const studentIdLower = studentId.toString().toLowerCase().trim();
+    
+    console.log('メール検証:', {
+      email: emailLower,
+      studentId: studentIdLower
+    });
+    
+    // パターン1: 完全一致チェック（大文字小文字無視）
+    if (emailLower.includes(studentIdLower)) {
+      return {
+        isValid: true,
+        reason: `学籍番号が完全一致: ${studentIdLower}`
+      };
+    }
+    
+    // パターン2: アルファベット混在形式の場合、数字部分でもチェック
+    if (/[a-z]/i.test(studentIdLower)) {
+      const numericPart = studentIdLower.replace(/[^0-9]/g, '');
+      
+      if (numericPart.length >= 4 && emailLower.includes(numericPart)) {
+        return {
+          isValid: true,
+          reason: `数字部分が一致: ${numericPart} (元: ${studentIdLower})`
+        };
+      }
+      
+      const emailNumericPart = emailLower.replace(/[^0-9]/g, '');
+      if (emailNumericPart.includes(numericPart) && numericPart.length >= 4) {
+        return {
+          isValid: true,
+          reason: `数字部分が間接一致: ${numericPart} (メール数字部分: ${emailNumericPart})`
+        };
+      }
+    }
+    
+    // パターン3: 学籍番号の一部（前6桁など）がメールに含まれるかチェック
+    if (studentIdLower.length >= 6) {
+      const prefix6 = studentIdLower.substring(0, 6);
+      const prefix5 = studentIdLower.substring(0, 5);
+      
+      if (emailLower.includes(prefix6)) {
+        return {
+          isValid: true,
+          reason: `学籍番号前6桁が一致: ${prefix6}`
+        };
+      }
+      
+      if (emailLower.includes(prefix5)) {
+        return {
+          isValid: true,
+          reason: `学籍番号前5桁が一致: ${prefix5}`
+        };
+      }
+    }
+    
+    return {
+      isValid: false,
+      reason: `学籍番号 ${studentIdLower} がメールアドレス ${emailLower} に含まれていません`
+    };
+    
+  } catch (error) {
+    console.error('❌ メール検証エラー:', error);
+    return {
+      isValid: false,
+      reason: 'メール検証処理でエラーが発生しました: ' + error.toString()
+    };
+  }
+}
+
+// ========================================
+// OCR処理（HEIC対応強化版）
+// ========================================
+
+function processStudentCardDriveOCR_StudentIdOnly(imageUrl) {
+  try {
+    console.log('Drive OCR処理開始 - URL:', imageUrl);
+    
+    const fileId = extractFileIdFromUrl(imageUrl);
+    if (!fileId) {
+      console.error('❌ ファイルID抽出失敗:', imageUrl);
+      return null;
+    }
+    
+    console.log('ファイルID:', fileId);
+    
+    let file;
+    try {
+      file = DriveApp.getFileById(fileId);
+      console.log('✅ ファイル取得成功:', file.getName());
+    } catch (permissionError) {
+      console.error('❌ ファイルアクセスエラー:', permissionError);
+      return null;
+    }
+    
+    let blob = file.getBlob();
+    const contentType = blob.getContentType();
+    const fileName = file.getName().toLowerCase();
+    console.log('✅ ファイル取得成功, タイプ:', contentType, 'ファイル名:', fileName);
+    
+    // HEIC形式の検出と変換処理
+    const isHeic = contentType === 'image/heic' || 
+                   contentType === 'image/heif' || 
+                   fileName.endsWith('.heic') || 
+                   fileName.endsWith('.heif');
+    
+    if (isHeic) {
+      console.log('⚠️ HEIC形式を検出 - 変換処理を実行します...');
+      const convertedBlob = convertHeicForOCR(file, blob);
+      if (convertedBlob) {
+        console.log('✅ HEIC変換成功');
+        blob = convertedBlob;
+      } else {
+        console.error('❌ HEIC変換失敗 - 元の形式で処理を継続します（失敗する可能性が高い）');
+      }
+    }
+    
+    const ocrText = performDriveOCR(blob, file.getName());
+    
+    if (ocrText && ocrText.trim() !== '') {
+      console.log('✅ Drive OCR検出テキスト長:', ocrText.length);
+      console.log('OCR抽出テキスト:', ocrText.substring(0, 200));
+      return extractStudentIdOnlyAlpha(ocrText);
+    } else {
+      console.log('❌ Drive OCRでテキストが検出されませんでした');
+      return null;
+    }
+    
+  } catch (error) {
+    console.error('❌ Drive OCR処理エラー:', error);
+    return null;
+  }
+}
+
+// ========================================
+// HEIC変換処理
+// ========================================
+
+function convertHeicForOCR(file, heicBlob) {
+  try {
+    console.log('🔄 HEIC変換処理開始...');
+    
+    const tempFolder = getOrCreateTempFolder();
+    const timestamp = new Date().getTime();
+    
+    console.log('📤 変換用一時ファイル作成中...');
+    
+    try {
+      console.log('🔧 Drive APIでの直接変換を試行...');
+      
+      const resource = {
+        title: `HEIC_CONVERT_${timestamp}`,
+        parents: [{id: tempFolder.getId()}],
+        mimeType: 'image/jpeg'
+      };
+      
+      const convertedFile = Drive.Files.insert(
+        resource,
+        heicBlob,
+        {
+          convert: true,
+          ocr: false
+        }
+      );
+      
+      if (convertedFile && convertedFile.id) {
+        console.log('✅ Drive APIでの変換成功:', convertedFile.id);
+        const convertedBlob = DriveApp.getFileById(convertedFile.id).getBlob();
+        
+        try {
+          DriveApp.getFileById(convertedFile.id).setTrashed(true);
+        } catch (e) {
+          console.warn('⚠️ 変換ファイルのクリーンアップ失敗');
+        }
+        
+        return convertedBlob;
+      }
+      
+    } catch (conversionError) {
+      console.warn('⚠️ Drive API変換失敗:', conversionError.toString());
+    }
+    
+    console.log('⚠️ HEIC自動変換に失敗しました');
+    console.log('💡 推奨: ユーザー側でJPEG/PNGに変換してアップロードしてもらう');
+    
+    return null;
+    
+  } catch (error) {
+    console.error('❌ HEIC変換エラー:', error);
+    return null;
+  }
+}
+
+function performDriveOCR(blob, originalFileName) {
+  let tempDocId = null;
+  
+  try {
+    const tempFolder = getOrCreateTempFolder();
+    const timestamp = new Date().getTime();
+    const tempFileName = `OCR_${originalFileName}_${timestamp}`;
+    
+    console.log('Drive OCR実行開始 - 一時ファイル名:', tempFileName);
+    
+    const resource = {
+      title: tempFileName,
+      parents: [{ id: tempFolder.getId() }],
+    };
+    
+    const options = {
+      ocr: true,
+      ocrLanguage: 'ja',
+      uploadType: 'multipart'
+    };
+    
+    console.log('⏳ OCR処理中...');
+    const doc = Drive.Files.insert(resource, blob, options);
+    
+    if (!doc || !doc.id) {
+      console.error('❌ Drive OCR実行失敗');
+      return null;
+    }
+    
+    tempDocId = doc.id;
+    console.log('✅ OCRドキュメント作成成功:', tempDocId);
+    
+    Utilities.sleep(5000);
+    
+    try {
+      const ocrDoc = DocumentApp.openById(tempDocId);
+      const ocrText = ocrDoc.getBody().getText();
+      console.log('✅ OCR結果テキスト取得成功 - 文字数:', ocrText.length);
+      return ocrText;
+    } catch (docError) {
+      console.warn('⚠️ DocumentAppでの取得失敗 - Drive API を試行');
+      const exportedContent = Drive.Files.export(tempDocId, 'text/plain');
+      return exportedContent.getContentText();
+    }
+    
+  } catch (error) {
+    console.error('❌ Drive OCR実行エラー:', error);
+    return null;
+  } finally {
+    if (tempDocId) {
+      try {
+        DriveApp.getFileById(tempDocId).setTrashed(true);
+        console.log('✅ 一時OCRファイル削除完了');
+      } catch (deleteError) {
+        console.warn('⚠️ 一時ファイル削除に失敗:', deleteError);
+      }
+    }
+  }
+}
+
+function extractStudentIdOnlyAlpha(text) {
+  try {
+    console.log('学生番号抽出開始 - テキスト長:', text.length);
+    
+    let normalizedText = text
+      .replace(/[０-９]/g, s => String.fromCharCode(s.charCodeAt(0) - 0xFEE0))
+      .replace(/[　\s]+/g, ' ')
+      .replace(/\r\n/g, '\n')
+      .trim();
+    
+    normalizedText = preprocessTextForDriveOCRAlpha(normalizedText);
+    
+    const studentId = extractStudentIdWithPatternsAlpha(normalizedText);
+    
+    if (studentId) {
+      console.log('✅ 学生番号抽出成功:', studentId);
+      return studentId;
+    }
+    
+    console.log('❌ 学生番号抽出失敗');
+    return null;
+    
+  } catch (error) {
+    console.error('❌ 学生番号抽出エラー:', error);
+    return null;
+  }
+}
+
+function preprocessTextForDriveOCRAlpha(text) {
+  return text
+    .replace(/(\d)\s+(\d)/g, '$1$2')
+    .replace(/([A-Za-z])\s+(\d)/g, '$1$2')
+    .replace(/(\d)\s+([A-Za-z])/g, '$1$2')
+    .replace(/学\s*生\s*番\s*号/g, '学生番号');
+}
+
+function extractStudentIdWithPatternsAlpha(text) {
+  const explicitPatterns = [
+    /学生番号[\s：:]*([A-Za-z0-9]{6,8})/i,
+    /学籍番号[\s：:]*([A-Za-z0-9]{6,8})/i,
+    /番号[\s：:]*([A-Za-z0-9]{6,8})/i
+  ];
+  
+  for (const pattern of explicitPatterns) {
+    const match = text.match(pattern);
+    if (match && match[1] && isValidStudentIdAlpha(match[1])) {
+      return match[1].toUpperCase();
+    }
+  }
+  
+  const citPatterns = [
+    /\b(\d{2}[A-Za-z]\d{4})\b/g,
+    /\b(\d{7})\b/g,
+    /\b([A-Za-z]\d{6})\b/g
+  ];
+  
+  for (const pattern of citPatterns) {
+    const matches = [...text.matchAll(pattern)];
+    for (const match of matches) {
+      if (isValidStudentIdAlpha(match[1])) {
+        return match[1].toUpperCase();
+      }
+    }
+  }
+  
+  return null;
+}
+
+function isValidStudentIdAlpha(idStr) {
+  if (!idStr || idStr.length < 6 || idStr.length > 8) return false;
+  if (/^(.)\1+$/.test(idStr)) return false;
+  
+  const patterns = [
+    {
+      regex: /^(\d{2})([A-Za-z])(\d{4})$/,
+      check: (match) => {
+        const year = parseInt(match[1]);
+        const currentYear = new Date().getFullYear() % 100;
+        return year >= (currentYear - 20) && year <= (currentYear + 2);
+      }
+    },
+    {
+      regex: /^(\d{7})$/,
+      check: (match) => {
+        const year = parseInt(match[1].substring(0, 2));
+        const currentYear = new Date().getFullYear() % 100;
+        return year >= (currentYear - 20) && year <= (currentYear + 2);
+      }
+    }
+  ];
+  
+  for (const pattern of patterns) {
+    const match = idStr.match(pattern.regex);
+    if (match && pattern.check(match)) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+function checkStudentIdConsistencyAlpha(inputStudentId, ocrStudentId) {
+  try {
+    const inputIdClean = inputStudentId.toString().trim().toUpperCase();
+    const ocrIdClean = ocrStudentId.toString().trim().toUpperCase();
+    
+    const isConsistent = inputIdClean === ocrIdClean;
+    
+    if (!isConsistent) {
+      const similarity = calculateSimilarity(inputIdClean, ocrIdClean);
+      if (similarity >= 0.8) {
+        return {
+          isConsistent: true,
+          details: `類似一致（類似度:${(similarity * 100).toFixed(1)}%）`
+        };
+      }
+      return {
+        isConsistent: false,
+        details: `不一致（入力:${inputIdClean} vs OCR:${ocrIdClean}）`
+      };
+    }
+    
+    return { isConsistent: true, details: '完全一致' };
+    
+  } catch (error) {
+    console.error('❌ 整合性チェックエラー:', error);
+    return { isConsistent: false, details: 'エラー発生' };
+  }
+}
+
+function calculateSimilarity(str1, str2) {
+  const len1 = str1.length;
+  const len2 = str2.length;
+  const matrix = [];
+
+  if (len1 === 0) return len2 === 0 ? 1 : 0;
+  if (len2 === 0) return 0;
+
+  for (let i = 0; i <= len2; i++) matrix[i] = [i];
+  for (let j = 0; j <= len1; j++) matrix[0][j] = j;
+
+  for (let i = 1; i <= len2; i++) {
+    for (let j = 1; j <= len1; j++) {
+      if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1,
+          matrix[i][j - 1] + 1,
+          matrix[i - 1][j] + 1
+        );
+      }
+    }
+  }
+
+  const distance = matrix[len2][len1];
+  const maxLen = Math.max(len1, len2);
+  return (maxLen - distance) / maxLen;
+}
+
+function checkDuplicatesAndColor(sheet, targetClub, targetName, currentRow) {
+  try {
+    const dataRange = sheet.getRange(2, 1, sheet.getLastRow() - 1, 11);
+    const data = dataRange.getValues();
+    const duplicateRows = [];
+    
+    for (let i = 0; i < data.length; i++) {
+      const rowName = data[i][5]; // F列: 氏名
+      if (rowName === targetName) {
+        duplicateRows.push(i + 2);
+      }
+    }
+    
+    if (duplicateRows.length > 1) {
+      duplicateRows.forEach(rowNum => {
+        sheet.getRange(rowNum, 1, 1, 11).setBackground('#FF0000');
+      });
+    }
+    
+    return {
+      hasDuplicates: duplicateRows.length > 1,
+      duplicateRows: duplicateRows
+    };
+    
+  } catch (error) {
+    console.error('❌ 重複チェックエラー:', error);
+    return { hasDuplicates: false, duplicateRows: [] };
+  }
+}
+
+// ========================================
+// メール送信（2種類）
+// ========================================
+
+function sendPersonalEmail(club, studentEmail, studentId, name) {
+  try {
+    if (!studentEmail) {
+      return { success: false, error: 'メールアドレスなし' };
+    }
+    
+    const subject = `【体育会本部】入部完了のお知らせ - ${club}`;
+    const body = `${name} 様
+
+お疲れ様です。
+体育会本部編集部長です。
+
+この度はフォームのご回答のほどありがとうございます。
+以下の内容で入部完了いたします。
+
+【フォーム回答内容】
+入部希望団体：${club}
+学生番号　　：${studentId}
+氏名　　　　：${name}
+
+何かご不明点等ございましたらご連絡ください。
+
+以上、失礼いたします。
+
+*********************************************
+千葉工業大学　体育会本部
+TEL：047-478-0251
+e-mail：cit.taiiku@gmail.com
+HP：https://sites.google.com/view/cittaiiku2021hp
+*********************************************`;
+    
+    GmailApp.sendEmail(studentEmail, subject, body);
+    console.log('✅ メール送信成功:', studentEmail);
+    
+    // 送信済みメールをゴミ箱に移動（容量節約）
+    moveSentEmailToTrash(subject);
+    
+    return { success: true, error: null };
+    
+  } catch (error) {
+    console.error('❌ メール送信エラー:', error);
+    return { success: false, error: error.toString() };
+  }
+}
+
+function sendDuplicateEmail(club, studentEmail, studentId, name) {
+  try {
+    if (!studentEmail) {
+      return { success: false, error: 'メールアドレスなし' };
+    }
+    
+    const subject = `【体育会本部】入部完了のお知らせ（再送） - ${club}`;
+    const body = `${name} 様
+
+お疲れ様です。
+体育会本部編集部長です。
+
+表題の件につきまして、以下の内容で入部完了いたしております。
+このメール以降、フォーム回答はお控えください。
+
+【フォーム回答内容】
+入部希望団体：${club}
+学生番号　　：${studentId}
+氏名　　　　：${name}
+
+何かご不明点等ございましたらご連絡ください。
+
+以上、失礼いたします。
+
+*********************************************
+千葉工業大学　体育会本部
+TEL：047-478-0251
+e-mail：cit.taiiku@gmail.com
+HP：https://sites.google.com/view/cittaiiku2021hp
+*********************************************`;
+    
+    GmailApp.sendEmail(studentEmail, subject, body);
+    console.log('✅ 重複者メール送信成功:', studentEmail);
+    
+    // 送信済みメールをゴミ箱に移動（容量節約）
+    moveSentEmailToTrash(subject);
+    
+    return { success: true, error: null };
+    
+  } catch (error) {
+    console.error('❌ 重複者メール送信エラー:', error);
+    return { success: false, error: error.toString() };
+  }
+}
+
+// ========================================
+// 送信済みメールをゴミ箱に移動（容量節約）
+// ========================================
+
+function moveSentEmailToTrash(subject) {
+  try {
+    // 送信から数秒待ってからゴミ箱移動（送信完了を確実にするため）
+    Utilities.sleep(2000);
+    
+    // 送信済みフォルダから該当メールを検索
+    const sentThreads = GmailApp.search('in:sent subject:"' + subject + '"', 0, 1);
+    
+    if (sentThreads.length > 0) {
+      const thread = sentThreads[0];
+      thread.moveToTrash();
+      console.log('✅ 送信済みメールをゴミ箱に移動:', subject);
+    } else {
+      console.warn('⚠️ 送信済みメールが見つかりません（既に移動済みの可能性）');
+    }
+    
+  } catch (error) {
+    console.error('❌ ゴミ箱移動エラー（メール送信自体は成功）:', error);
+    // エラーでも処理は継続（メール送信が成功していれば問題なし）
+  }
+}
+
+// ========================================
+// ユーティリティ
+// ========================================
+
+function extractFileIdFromUrl(url) {
+  if (!url) return null;
+  
+  const patterns = [
+    /\/file\/d\/([a-zA-Z0-9-_]+)/,
+    /id=([a-zA-Z0-9-_]+)/,
+    /\/d\/([a-zA-Z0-9-_]+)/,
+    /open\?id=([a-zA-Z0-9-_]+)/
+  ];
+  
+  for (const pattern of patterns) {
+    const match = url.match(pattern);
+    if (match) return match[1];
+  }
+  
+  return null;
+}
+
+function getOrCreateTempFolder() {
+  const folderName = 'OCR_Temp_' + new Date().getFullYear();
+  
+  try {
+    const folders = DriveApp.getFoldersByName(folderName);
+    if (folders.hasNext()) {
+      return folders.next();
+    }
+    return DriveApp.createFolder(folderName);
+  } catch (error) {
+    console.error('❌ 一時フォルダ操作エラー:', error);
+    return DriveApp.getRootFolder();
+  }
+}
