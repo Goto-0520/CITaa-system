@@ -1,0 +1,1097 @@
+# =============================================================================
+# セル1: ライブラリのインストールとフォント設定（修正版）
+# =============================================================================
+print("必要なライブラリをインストール中...")
+!pip install openpyxl msoffcrypto-tool reportlab PyPDF2 pillow -q
+print("✓ インストール完了")
+
+import os
+
+print("\n日本語フォントをダウンロード中...")
+FONT_PATH = None
+FONT_NAME_DISPLAY = None
+
+try:
+    # 方法1: Noto Sans JPをダウンロード
+    print("[試行1] Noto Sans JP をダウンロード中...")
+    !wget -q https://github.com/google/fonts/raw/main/ofl/notosansjp/NotoSansJP%5Bwght%5D.ttf -O NotoSansJP.ttf
+
+    if os.path.exists('NotoSansJP.ttf') and os.path.getsize('NotoSansJP.ttf') > 100000:
+        FONT_PATH = 'NotoSansJP.ttf'
+        FONT_NAME_DISPLAY = "Noto Sans JP"
+        print(f"✓ {FONT_NAME_DISPLAY} のダウンロード完了")
+    else:
+        # 方法2: IPAフォント（別URL）
+        print("\n[試行2] IPAゴシック をダウンロード中...")
+        !wget -q https://moji.or.jp/wp-content/ipafont/IPAfont/ipag.ttf -O ipag.ttf
+
+        if os.path.exists('ipag.ttf') and os.path.getsize('ipag.ttf') > 100000:
+            FONT_PATH = 'ipag.ttf'
+            FONT_NAME_DISPLAY = "IPAゴシック"
+            print(f"✓ {FONT_NAME_DISPLAY} のダウンロード完了")
+        else:
+            # 方法3: Google Fonts API経由
+            print("\n[試行3] Google Fonts から Noto Sans JP をダウンロード中...")
+            !wget -q "https://fonts.google.com/download?family=Noto%20Sans%20JP" -O notosans.zip
+            !unzip -q -o notosans.zip -d notosans_fonts
+
+            # TTFファイルを探す
+            import glob
+            ttf_files = glob.glob('notosans_fonts/*.ttf')
+            if ttf_files:
+                FONT_PATH = ttf_files[0]
+                FONT_NAME_DISPLAY = "Noto Sans JP (Google Fonts)"
+                print(f"✓ {FONT_NAME_DISPLAY} のダウンロード完了")
+            else:
+                print("\n✗ すべてのフォントダウンロードに失敗")
+                print("システムフォントを検索します...")
+
+                # システムフォントを探す
+                system_fonts = [
+                    '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
+                    '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+                ]
+                for font_path in system_fonts:
+                    if os.path.exists(font_path):
+                        FONT_PATH = font_path
+                        FONT_NAME_DISPLAY = os.path.basename(font_path)
+                        print(f"✓ システムフォント {FONT_NAME_DISPLAY} を使用")
+                        break
+
+                if not FONT_PATH:
+                    print("代替フォント(Helvetica)を使用します - 日本語は正しく表示されません")
+                    FONT_NAME_DISPLAY = "Helvetica (英数字のみ)"
+
+except Exception as e:
+    print(f"\n✗ フォントダウンロードエラー: {e}")
+    print("代替フォント(Helvetica)を使用します")
+    FONT_PATH = None
+    FONT_NAME_DISPLAY = "Helvetica (英数字のみ)"
+
+print(f"\n使用フォント: {FONT_NAME_DISPLAY}")
+print("-" * 60)
+
+# =============================================================================
+# セル2: スプレッドシートから設定情報を読み込み（Google Sheets API版）
+# =============================================================================
+
+print("=" * 60)
+print("Google Sheets APIのセットアップ")
+print("=" * 60)
+
+# 必要なライブラリをインストール
+print("ライブラリをインストール中...")
+!pip install gspread google-auth google-auth-oauthlib google-auth-httplib2 -q
+print("✓ インストール完了\n")
+
+from google.colab import auth
+import gspread
+from google.auth import default
+import pandas as pd
+
+print("Googleアカウント認証を開始します...")
+print("ブラウザでポップアップが表示されたら、許可してください。")
+
+# Google Colab認証
+auth.authenticate_user()
+
+# 認証情報を取得
+creds, _ = default()
+
+# gspreadクライアントを作成
+gc = gspread.authorize(creds)
+print("✓ 認証完了\n")
+
+print("=" * 60)
+print("設定情報の読み込み")
+print("=" * 60)
+
+# スプレッドシートID
+SPREADSHEET_ID = "1dYTBTmpI6xY8HH5uaxmDClgMCwkJD6F_5knav75n8Ks"
+
+try:
+    print("\n設定情報を読み込み中...")
+
+    # スプレッドシートを開く
+    spreadsheet = gc.open_by_key(SPREADSHEET_ID)
+    print(f"✓ スプレッドシート接続成功: {spreadsheet.title}")
+
+    # シート名
+    sheet_names = {
+        'required': '必要項目一覧',
+        'password': 'パスワード一覧',
+        'advisor': '顧問一覧'
+    }
+
+    # 必要項目シート
+    print(f"\n  - {sheet_names['required']}を読み込み中...")
+    worksheet_required = spreadsheet.worksheet(sheet_names['required'])
+    data_required = worksheet_required.get_all_values()
+    df_required = pd.DataFrame(data_required[1:], columns=data_required[0])
+    print(f"    ✓ {len(df_required)}行読み込み完了")
+    print(f"    列名: {list(df_required.columns)}")
+
+    REQUIRED_COLUMNS = {}
+    for _, row in df_required.iterrows():
+        club_name = str(row['団体名']).strip()
+        if pd.isna(club_name) or club_name == '' or club_name == 'nan':
+            continue
+
+        cols = []
+        # チェックマークの判定（✓、TRUE、○、1など）
+        if str(row.get('学生携帯番号', '')).strip() in ['✓', 'TRUE', '○', 'True', 'true', '1', 'TRUE()']:
+            cols.append('学生携帯番号')
+        if str(row.get('保証人携帯番号', '')).strip() in ['✓', 'TRUE', '○', 'True', 'true', '1', 'TRUE()']:
+            cols.append('保証人携帯')
+        if str(row.get('住所', '')).strip() in ['✓', 'TRUE', '○', 'True', 'true', '1', 'TRUE()']:
+            cols.append('住所')
+
+        REQUIRED_COLUMNS[club_name] = cols
+
+    # パスワード一覧シート
+    print(f"\n  - {sheet_names['password']}を読み込み中...")
+    worksheet_password = spreadsheet.worksheet(sheet_names['password'])
+    data_password = worksheet_password.get_all_values()
+    df_password = pd.DataFrame(data_password[1:], columns=data_password[0])
+    print(f"    ✓ {len(df_password)}行読み込み完了")
+    print(f"    列名: {list(df_password.columns)}")
+
+    PDF_PASSWORDS = {}
+    for _, row in df_password.iterrows():
+        club_name = str(row['団体名']).strip()
+        password = str(row['パスワード']).strip()
+        if pd.notna(club_name) and pd.notna(password) and club_name != '' and club_name != 'nan' and password != 'nan':
+            PDF_PASSWORDS[club_name] = password
+
+    # 顧問一覧シート（修正版：顧問優先、なければ部長）
+    print(f"\n  - {sheet_names['advisor']}を読み込み中...")
+    worksheet_advisor = spreadsheet.worksheet(sheet_names['advisor'])
+    data_advisor = worksheet_advisor.get_all_values()
+    df_advisor = pd.DataFrame(data_advisor[1:], columns=data_advisor[0])
+    print(f"    ✓ {len(df_advisor)}行読み込み完了")
+    print(f"    列名: {list(df_advisor.columns)}")
+
+    ADVISORS = {}
+    for _, row in df_advisor.iterrows():
+        club_name = str(row['団体名']).strip()
+        if pd.isna(club_name) or club_name == '' or club_name == 'nan':
+            continue
+
+        # 顧問優先、なければ部長
+        advisor_name = None
+        if pd.notna(row.get('顧問', '')) and str(row['顧問']).strip() and str(row['顧問']).strip() != 'nan':
+            advisor_name = f"顧問:{str(row['顧問']).strip()}"
+        elif pd.notna(row.get('部長', '')) and str(row['部長']).strip() and str(row['部長']).strip() != 'nan':
+            advisor_name = f"部長:{str(row['部長']).strip()}"
+
+        if advisor_name:
+            ADVISORS[club_name] = advisor_name
+
+    print(f"\n✓ 設定情報読み込み完了")
+    print(f"  - 団体数: {len(REQUIRED_COLUMNS)}個")
+    print(f"  - パスワード設定数: {len(PDF_PASSWORDS)}個")
+    print(f"  - 顧問情報数: {len(ADVISORS)}個")
+
+    # サンプル表示（最初の3団体）
+    print(f"\n【サンプル確認】最初の3団体:")
+    for i, (club, cols) in enumerate(list(REQUIRED_COLUMNS.items())[:3]):
+        print(f"  {i+1}. {club}")
+        print(f"     追加項目: {', '.join(cols) if cols else 'なし'}")
+        print(f"     パスワード: {'設定済み' if club in PDF_PASSWORDS else '未設定'}")
+        advisor_text = ADVISORS.get(club, '未設定')
+        print(f"     顧問: {advisor_text}")
+
+except gspread.exceptions.WorksheetNotFound as e:
+    print(f"\n✗ シートが見つかりません: {e}")
+    print("\n【確認事項】")
+    print("シート名が以下と完全一致しているか確認してください:")
+    print("  - 必要項目一覧")
+    print("  - パスワード一覧")
+    print("  - 顧問一覧")
+    REQUIRED_COLUMNS = {}
+    PDF_PASSWORDS = {}
+    ADVISORS = {}
+
+except gspread.exceptions.SpreadsheetNotFound as e:
+    print(f"\n✗ スプレッドシートが見つかりません: {e}")
+    print("\n【確認事項】")
+    print("1. スプレッドシートIDが正しいか確認してください")
+    print("2. スプレッドシートの共有設定を確認してください")
+    print("   - 「リンクを知っている全員が閲覧可」になっているか")
+    REQUIRED_COLUMNS = {}
+    PDF_PASSWORDS = {}
+    ADVISORS = {}
+
+except Exception as e:
+    print(f"\n✗ 設定情報読み込み失敗: {e}")
+    print("\n【エラー詳細】")
+    import traceback
+    traceback.print_exc()
+
+    print("\n【確認事項】")
+    print("1. 認証が正常に完了したか")
+    print("2. スプレッドシートIDが正しいか")
+    print("3. シート名が正しいか")
+    print("4. 列名が以下と完全一致しているか:")
+    print("   - 必要項目一覧: 団体名, 学生携帯番号, 保証人携帯番号, 住所")
+    print("   - パスワード一覧: 団体名, パスワード")
+    print("   - 顧問一覧: 団体名, 部長, 顧問, 監督, コーチ")
+
+    REQUIRED_COLUMNS = {}
+    PDF_PASSWORDS = {}
+    ADVISORS = {}
+
+# =============================================================================
+# セル3: メイン処理 - PDF生成（修正版v4.1 - ドラッグ＆ドロップ対応）
+# =============================================================================
+import io
+import os
+import zipfile
+import re
+import unicodedata
+import base64
+from datetime import datetime
+from google.colab import files as colab_files
+from google.colab import output
+from openpyxl import load_workbook
+import msoffcrypto
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4, landscape, portrait
+from reportlab.lib.units import mm
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Spacer, Paragraph
+from reportlab.lib.styles import getSampleStyleSheet
+from PyPDF2 import PdfReader, PdfWriter
+from IPython.display import display, HTML
+import json
+
+# フォント登録（修正版）
+FONT_NAME = 'Helvetica'
+if FONT_PATH and os.path.exists(FONT_PATH):
+    try:
+        pdfmetrics.registerFont(TTFont('JapaneseFont', FONT_PATH))
+        FONT_NAME = 'JapaneseFont'
+        print(f"✓ {FONT_NAME_DISPLAY} フォント登録成功")
+    except Exception as e:
+        print(f"⚠ フォント登録エラー: {e}")
+        print("Helveticaを使用します（日本語表示に問題がある場合があります）")
+
+# 余白設定(mm) - 縮小
+MARGIN = {'left': 8, 'right': 8, 'top': 10, 'bottom': 10}
+
+def normalize_club_name(name):
+    """団体名を正規化（部・同好会・愛好会を除去）"""
+    suffixes = ['部', '同好会', '愛好会', 'サークル']
+    normalized = name.strip()
+    for suffix in suffixes:
+        if normalized.endswith(suffix):
+            normalized = normalized[:-len(suffix)]
+    return normalized
+
+def find_matching_club_name(sheet_name, config_dict):
+    """シート名に対応する設定名を検索"""
+    if sheet_name in config_dict:
+        return sheet_name
+
+    normalized_sheet = normalize_club_name(sheet_name)
+    for config_name in config_dict.keys():
+        normalized_config = normalize_club_name(config_name)
+        if normalized_sheet == normalized_config:
+            return config_name
+
+    return None
+
+def find_header_row(ws):
+    """ヘッダー行を自動検出"""
+    for row_idx in range(1, min(11, ws.max_row + 1)):
+        row = list(ws[row_idx])
+        row_values = [str(cell.value).strip() if cell.value else '' for cell in row]
+
+        header_keywords = ['役職', '学籍', '氏名', 'カナ']
+        if any(any(keyword in val for keyword in header_keywords) for val in row_values):
+            return row_idx
+
+    return 2
+
+def decrypt_excel(encrypted_file_path, password):
+    """パスワード付きExcelファイルを復号化"""
+    decrypted = io.BytesIO()
+    with open(encrypted_file_path, 'rb') as f:
+        office_file = msoffcrypto.OfficeFile(f)
+        office_file.load_key(password=password)
+        office_file.decrypt(decrypted)
+    decrypted.seek(0)
+    return decrypted
+
+def decrypt_excel_from_bytes(file_bytes, password):
+    """バイトデータからパスワード付きExcelファイルを復号化"""
+    decrypted = io.BytesIO()
+    encrypted_stream = io.BytesIO(file_bytes)
+    office_file = msoffcrypto.OfficeFile(encrypted_stream)
+    office_file.load_key(password=password)
+    office_file.decrypt(decrypted)
+    decrypted.seek(0)
+    return decrypted
+
+def should_include_column(club_name, column_name):
+    """団体に応じて列を含めるか判定"""
+    matched_name = find_matching_club_name(club_name, REQUIRED_COLUMNS)
+    required = REQUIRED_COLUMNS.get(matched_name, []) if matched_name else []
+
+    col_str = str(column_name).strip()
+
+    # 基本項目は常に含める（役職は除外、後で手動追加）
+    base_keywords = ['学籍', '学年', '氏名', 'カナ', '性別', '生年月日']
+    if any(keyword in col_str for keyword in base_keywords):
+        return True
+
+    if '携帯' in col_str:
+        if '学生' in col_str and '学生携帯番号' in required:
+            return True
+        if '保証人' in col_str and '保証人携帯' in required:
+            return True
+
+    if '住所' in col_str and '住所' in required:
+        return True
+
+    return False
+
+def convert_to_halfwidth(text):
+    """全角英数字・カナを半角に変換"""
+    if text is None or text == '':
+        return ''
+    return unicodedata.normalize('NFKC', str(text))
+
+def format_phone_number(phone):
+    """電話番号からハイフンを削除し、半角に変換"""
+    if phone is None or phone == '':
+        return ''
+    phone_str = convert_to_halfwidth(str(phone))
+    return phone_str.replace('-', '').replace('ー', '')
+
+def format_birthdate(date_value):
+    """生年月日を YYYY/MM/DD 形式に変換（半角）"""
+    if date_value is None or date_value == '':
+        return ''
+
+    date_str = str(date_value)
+
+    # 既に日付型の場合
+    if hasattr(date_value, 'strftime'):
+        return date_value.strftime('%Y/%m/%d')
+
+    # 文字列の場合、パターンマッチング
+    match = re.match(r'(\d{4})-(\d{2})-(\d{2})', date_str)
+    if match:
+        return f"{match.group(1)}/{match.group(2)}/{match.group(3)}"
+
+    if re.match(r'\d{4}/\d{2}/\d{2}', date_str):
+        return date_str.split()[0]
+
+    return convert_to_halfwidth(date_str)
+
+def check_required_roles(ws, header_row_idx, role_col_idx, club_name):
+    """役職名称に「主将」または「会計」が含まれているかチェック"""
+    if role_col_idx is None:
+        return {'has_captain': False, 'has_accountant': False, 'roles': []}
+
+    has_captain = False
+    has_accountant = False
+    all_roles = []
+
+    # データ行をチェック
+    for row in ws.iter_rows(min_row=header_row_idx + 1, values_only=True):
+        # 空行チェック
+        if not row or not any(row):
+            break
+
+        # 役職列の値を取得
+        if role_col_idx < len(row) and row[role_col_idx]:
+            role_value = str(row[role_col_idx]).strip()
+
+            # 空白でない場合のみチェック
+            if role_value and role_value != '部員':
+                all_roles.append(role_value)
+
+                # 「主将」を含むかチェック（兼任パターン「主将・会計」なども対応）
+                if '主将' in role_value:
+                    has_captain = True
+
+                # 「会計」を含むかチェック（兼任パターン「主務・会計」なども対応）
+                if '会計' in role_value:
+                    has_accountant = True
+
+    return {
+        'has_captain': has_captain,
+        'has_accountant': has_accountant,
+        'roles': all_roles
+    }
+
+def calculate_column_widths(headers, data, page_width):
+    """各列の内容に基づいて最適な列幅を計算（住所は結合後のデータで計算）"""
+    # 各列の最大文字数を計算（全角文字は2文字分とカウント）
+    def char_width(text):
+        width = 0
+        for char in str(text):
+            if ord(char) > 0x7F:  # 全角文字
+                width += 2
+            else:  # 半角文字
+                width += 1
+        return width
+
+    max_widths = []
+    for col_idx in range(len(headers)):
+        max_width = char_width(headers[col_idx])
+        for row in data[1:]:  # ヘッダー以外のデータ行
+            if col_idx < len(row):
+                max_width = max(max_width, char_width(row[col_idx]))
+        max_widths.append(max_width)
+
+    # 列幅の基本配分（文字幅に基づく）
+    col_widths = []
+
+    for i, (header, max_width) in enumerate(zip(headers, max_widths)):
+        # 列ごとの調整係数
+        if header == '':  # 連番列または空白列
+            if i == 0:  # 連番列
+                width = 18
+            else:  # 空白列
+                width = 15
+        elif '役職' in header:
+            width = max(40, min(60, max_width * 4))
+        elif '学籍' in header:
+            width = 42
+        elif '学年' in header:
+            width = 25
+        elif '氏名' in header and 'カナ' not in header:
+            width = max(50, min(70, max_width * 4))
+        elif 'カナ' in header:
+            width = max(60, min(80, max_width * 3.5))
+        elif '性別' in header:
+            width = 25
+        elif '生年月日' in header:
+            width = 50
+        elif '携帯' in header or '電話' in header:
+            width = 60
+        elif '住所' in header:
+            # 住所列は結合後の実データの最大幅に基づいて計算
+            width = max(100, min(200, max_width * 3.5))
+        else:
+            width = max(40, min(90, max_width * 4))
+
+        col_widths.append(width)
+
+    # 合計幅が page_width を超える場合は比例縮小
+    total_width = sum(col_widths)
+    if total_width > page_width:
+        scale = page_width / total_width
+        col_widths = [w * scale for w in col_widths]
+
+    return col_widths
+
+def create_pdf_from_sheet(ws, club_name, output_path):
+    """シートからPDFを生成（用紙の向きは項目数で判断）"""
+    header_row_idx = find_header_row(ws)
+    print(f"    ヘッダー行: {header_row_idx}行目")
+
+    # ヘッダー行の取得と列インデックスの記録
+    original_headers = []
+    header_indices = []
+    role_col_idx = None  # 役職列のインデックス（元データ）
+    gakuseki_col_idx = None  # 学籍列のインデックス
+    address_col_idx = None  # 住所列のインデックス
+    address_merge_cols = []  # 住所を結合する列のインデックス
+    address_display_name = None  # 住所列の表示名
+
+    for idx, cell in enumerate(ws[header_row_idx]):
+        if cell.value:
+            col_name = str(cell.value).strip()
+            original_headers.append(col_name)
+            header_indices.append(idx)
+
+            # 役職列を記録
+            if '役職' in col_name:
+                role_col_idx = idx
+
+            # 学籍列を記録
+            if '学籍' in col_name:
+                gakuseki_col_idx = idx
+
+            # 住所列を記録
+            if '住所' in col_name:
+                address_col_idx = idx
+
+    # 学籍番号の左隣を役職列として使用（役職列が見つからない場合）
+    if role_col_idx is None and gakuseki_col_idx is not None and gakuseki_col_idx > 0:
+        role_col_idx = gakuseki_col_idx - 1
+        print(f"    役職列を自動検出: {role_col_idx}列目（学籍番号の左隣）")
+
+    # 役職チェック（主将・会計の存在確認）
+    role_check = check_required_roles(ws, header_row_idx, role_col_idx, club_name)
+
+    if not role_check['has_captain'] or not role_check['has_accountant']:
+        error_msg = f"    ⚠ 役職エラー検出:"
+        if not role_check['has_captain']:
+            error_msg += " 【主将】が見つかりません"
+        if not role_check['has_accountant']:
+            error_msg += " 【会計】が見つかりません"
+        print(error_msg)
+        print(f"       団体名: {club_name}")
+        print(f"       検出された役職: {', '.join(role_check['roles'][:10])}")
+        # エラーを記録するが処理は続行
+        return {'error': error_msg, 'club_name': club_name, 'roles': role_check['roles']}
+
+    # 住所列の結合処理を改善
+    if address_col_idx is not None:
+        address_merge_cols = [address_col_idx]
+        base_address_name = str(ws[header_row_idx][address_col_idx].value).strip()
+
+        # パターン1: 「学生住所1」「学生住所2」などの連番パターンを検出
+        # 「学生住所1」→ベース名「学生住所」、番号「1」
+        match = re.match(r'^(.+?)(\d+)$', base_address_name)
+        if match:
+            base_name = match.group(1)  # 例: "学生住所"
+            # 右隣2列で同じベース名 + 連番をチェック
+            for offset in [1, 2]:
+                next_idx = address_col_idx + offset
+                if next_idx < len(ws[header_row_idx]):
+                    next_cell = ws[header_row_idx][next_idx]
+                    if next_cell.value:
+                        next_name = str(next_cell.value).strip()
+                        # 同じベース名で連番が続く場合
+                        if next_name.startswith(base_name) and re.match(r'^.+?\d+$', next_name):
+                            address_merge_cols.append(next_idx)
+
+            if len(address_merge_cols) > 1:
+                print(f"    住所列を結合（連番パターン）: {len(address_merge_cols)}列 - {base_name}1,2,3 → {base_name}")
+                # 出力時のヘッダー名はベース名のみ（例: "学生住所1" → "学生住所"）
+                address_display_name = base_name
+
+        # パターン2: 右隣が空白ヘッダーの場合（従来の処理）
+        else:
+            for offset in [1, 2]:
+                next_idx = address_col_idx + offset
+                if next_idx < len(ws[header_row_idx]):
+                    next_cell = ws[header_row_idx][next_idx]
+                    if not next_cell.value or str(next_cell.value).strip() == '':
+                        address_merge_cols.append(next_idx)
+
+            if len(address_merge_cols) > 1:
+                print(f"    住所列を結合（空白パターン）: {len(address_merge_cols)}列（{address_merge_cols}）")
+
+        # 表示名が設定されていない場合は元の名前を使用
+        if address_display_name is None:
+            address_display_name = base_address_name
+
+    # 出力用のヘッダーを構築（必須項目の順序）
+    output_headers = ['', '', '役職名称']  # 連番列、空白列、役職名称
+    output_indices = [-1, -2, role_col_idx if role_col_idx is not None else -3]
+
+    # 必須項目を順番に追加
+    required_order = ['学籍', '学年', '氏名', 'カナ', '性別', '生年月日', '携帯']
+
+    for required_keyword in required_order:
+        for idx, col_name in zip(header_indices, original_headers):
+            # 役職列はスキップ（既に追加済み）
+            if idx == role_col_idx:
+                continue
+
+            # 必須キーワードに一致する列を追加
+            if required_keyword in col_name:
+                # 携帯の場合は「学生携帯」のみ
+                if required_keyword == '携帯':
+                    if '学生' in col_name and idx not in output_indices:
+                        output_headers.append(col_name)
+                        output_indices.append(idx)
+                        break
+                # 氏名の場合はカナ以外
+                elif required_keyword == '氏名':
+                    if 'カナ' not in col_name and idx not in output_indices:
+                        output_headers.append(col_name)
+                        output_indices.append(idx)
+                        break
+                # その他の項目
+                else:
+                    if idx not in output_indices:
+                        output_headers.append(col_name)
+                        output_indices.append(idx)
+                        break
+
+    # その他の必要な列を追加（保証人携帯、住所など）
+    for idx, col_name in zip(header_indices, original_headers):
+        if idx in output_indices or idx == role_col_idx:
+            continue
+
+        # 住所列の場合、結合対象の列はスキップ
+        if address_col_idx is not None and idx in address_merge_cols and idx != address_col_idx:
+            continue
+
+        if should_include_column(club_name, col_name):
+            # 住所列の場合は結合情報と表示名を保持
+            if idx == address_col_idx and len(address_merge_cols) > 1:
+                output_headers.append(address_display_name)
+                output_indices.append(address_merge_cols)  # リストとして格納
+            else:
+                output_headers.append(col_name)
+                output_indices.append(idx)
+
+    if len(output_headers) <= 3:
+        raise ValueError(f"{club_name}: 出力する列が見つかりません")
+
+    # 住所列の有無をチェック
+    has_address = any('住所' in h for h in output_headers)
+
+    # 用紙の向きを決定
+    if has_address:
+        page_size = landscape(A4)
+        print(f"    用紙: A4横向き（住所列あり）")
+    else:
+        page_size = portrait(A4)
+        print(f"    用紙: A4縦向き（住所列なし）")
+
+    page_settings = {
+        'pagesize': page_size,
+        'leftMargin': MARGIN['left']*mm,
+        'rightMargin': MARGIN['right']*mm,
+        'topMargin': MARGIN['top']*mm,
+        'bottomMargin': MARGIN['bottom']*mm
+    }
+
+    doc = SimpleDocTemplate(output_path, **page_settings)
+
+    print(f"    出力列数: {len(output_headers)}列")
+    print(f"    列構成: {', '.join(output_headers[:8])}...")
+
+    # データ取得（住所列は結合してから列幅計算に使用）
+    data = [output_headers]
+    row_number = 1
+
+    for row in ws.iter_rows(min_row=header_row_idx + 1, values_only=True):
+        # 空行チェック（学籍番号がない行はスキップ）
+        gakuseki_idx = None
+        for i, h_idx in enumerate(output_indices):
+            if isinstance(h_idx, int) and h_idx >= 0 and i < len(output_headers) and '学籍' in output_headers[i]:
+                gakuseki_idx = h_idx
+                break
+
+        if gakuseki_idx is not None and (not row[gakuseki_idx] or str(row[gakuseki_idx]).strip() == ''):
+            break
+
+        row_data = []
+        for i, header_idx in enumerate(output_indices):
+            if header_idx == -1:  # 連番列
+                row_data.append(str(row_number))
+            elif header_idx == -2:  # 空白列
+                row_data.append('')
+            elif header_idx == -3:  # 役職列が見つからない場合
+                row_data.append('部員')
+            elif isinstance(header_idx, list):  # 住所列（結合）
+                # 複数列を結合して左揃え
+                merged_values = []
+                for col_idx in header_idx:
+                    if col_idx < len(row) and row[col_idx]:
+                        val = str(row[col_idx]).strip()
+                        if val:
+                            merged_values.append(val)
+                merged_address = ' '.join(merged_values)
+                row_data.append(convert_to_halfwidth(merged_address))
+            else:
+                cell_value = row[header_idx] if header_idx < len(row) else ''
+                header_name = output_headers[i] if i < len(output_headers) else ''
+
+                # 役職名称列：空白の場合「部員」を設定
+                if '役職' in header_name:
+                    if not cell_value or str(cell_value).strip() == '':
+                        row_data.append('部員')
+                    else:
+                        row_data.append(convert_to_halfwidth(str(cell_value)))
+                # 電話番号の処理
+                elif '携帯' in header_name or '電話' in header_name:
+                    row_data.append(format_phone_number(cell_value))
+                # 生年月日の処理
+                elif '生年月日' in header_name:
+                    row_data.append(format_birthdate(cell_value))
+                # その他はすべて半角変換
+                else:
+                    formatted_value = convert_to_halfwidth(str(cell_value) if cell_value is not None else '')
+                    row_data.append(formatted_value)
+
+        data.append(row_data)
+        row_number += 1
+
+    print(f"    データ行数: {len(data) - 1}行")
+
+    # 列幅の計算（住所は結合後のデータで計算）
+    page_width = page_settings['pagesize'][0] - page_settings['leftMargin'] - page_settings['rightMargin']
+    col_widths = calculate_column_widths(output_headers, data, page_width)
+
+    # テーブルスタイル（すべて左揃え、フォントサイズ7）
+    style_commands = [
+        ('FONT', (0, 0), (-1, -1), FONT_NAME, 7),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 2),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 2),
+        ('TOPPADDING', (0, 0), (-1, -1), 2),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+    ]
+
+    style = TableStyle(style_commands)
+
+    table = Table(data, colWidths=col_widths, repeatRows=1)
+    table.setStyle(style)
+
+    # タイトル情報（フォントサイズ7に統一）
+    update_date = datetime.now().strftime('%Y年%m月%d日')
+    matched_advisor_name = find_matching_club_name(club_name, ADVISORS)
+    advisor_info = ADVISORS.get(matched_advisor_name, '') if matched_advisor_name else ''
+
+    total_width = sum(col_widths)
+    title_col_widths = [total_width * 0.7, total_width * 0.3]
+
+    title_data = [
+        [club_name, f"{update_date}更新"],
+        [advisor_info, '']
+    ]
+
+    title_table = Table(title_data, colWidths=title_col_widths)
+    title_table.setStyle(TableStyle([
+        ('FONT', (0, 0), (-1, -1), FONT_NAME, 7),
+        ('ALIGN', (0, 0), (0, -1), 'LEFT'),
+        ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+    ]))
+
+    elements = [title_table, Spacer(1, 2*mm), table]
+    doc.build(elements)
+
+    return None  # 正常終了
+
+def add_password_to_pdf(input_pdf_path, output_pdf_path, password):
+    """PDFにパスワードを設定"""
+    reader = PdfReader(input_pdf_path)
+    writer = PdfWriter()
+
+    for page in reader.pages:
+        writer.add_page(page)
+
+    writer.encrypt(password)
+
+    with open(output_pdf_path, 'wb') as output_file:
+        writer.write(output_file)
+
+def upload_file_with_drag_drop():
+    """ドラッグ＆ドロップ対応のファイルアップロードUI（eval_js版）"""
+
+    upload_html = """
+    <style>
+        #drop-area {
+            border: 3px dashed #4CAF50;
+            border-radius: 10px;
+            padding: 40px;
+            text-align: center;
+            background-color: #f9f9f9;
+            margin: 20px 0;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+        #drop-area:hover, #drop-area.highlight {
+            background-color: #e8f5e9;
+            border-color: #45a049;
+        }
+        #drop-area.highlight {
+            background-color: #c8e6c9;
+            border-style: solid;
+        }
+        .upload-icon {
+            font-size: 60px;
+            color: #4CAF50;
+            margin-bottom: 20px;
+        }
+        .upload-title {
+            font-size: 24px;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 15px;
+        }
+        .upload-instructions {
+            font-size: 16px;
+            color: #666;
+            margin-bottom: 10px;
+            line-height: 1.6;
+        }
+        .upload-note {
+            font-size: 14px;
+            color: #999;
+            margin-top: 15px;
+        }
+        .highlight-text {
+            color: #4CAF50;
+            font-weight: bold;
+        }
+        #file-input {
+            display: none;
+        }
+        #file-info {
+            margin-top: 15px;
+            padding: 10px;
+            background-color: #e8f5e9;
+            border-radius: 5px;
+            display: none;
+        }
+        #file-info.show {
+            display: block;
+        }
+        .success-icon {
+            color: #4CAF50;
+            font-size: 20px;
+        }
+    </style>
+
+    <div id="drop-area">
+        <div class="upload-icon">📁</div>
+        <div class="upload-title">データファイルをアップロード</div>
+        <div class="upload-instructions">
+            ✅ <span class="highlight-text">ファイルをここにドラッグ＆ドロップ</span><br>
+            または<br>
+            ✅ <span class="highlight-text">ここをクリックしてファイルを選択</span>
+        </div>
+        <div class="upload-note">
+            ※ Excelファイル（.xlsx）を選択してください<br>
+            ※ パスワード保護されたファイルに対応しています
+        </div>
+        <input type="file" id="file-input" accept=".xlsx,.xls">
+    </div>
+    <div id="file-info">
+        <span class="success-icon">✓</span> <span id="file-name"></span> を選択しました
+    </div>
+    """
+
+    display(HTML(upload_html))
+
+    # JavaScriptでファイルを読み込んで返す
+    js_code = """
+    async function waitForFile() {
+        return new Promise((resolve, reject) => {
+            const dropArea = document.getElementById('drop-area');
+            const fileInput = document.getElementById('file-input');
+            const fileInfo = document.getElementById('file-info');
+            const fileName = document.getElementById('file-name');
+
+            function handleFile(file) {
+                fileName.textContent = file.name;
+                fileInfo.classList.add('show');
+
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const base64Data = e.target.result.split(',')[1];
+                    resolve(JSON.stringify({name: file.name, data: base64Data}));
+                };
+                reader.onerror = function() {
+                    reject('ファイル読み込みエラー');
+                };
+                reader.readAsDataURL(file);
+            }
+
+            // ドラッグイベント
+            ['dragenter', 'dragover'].forEach(eventName => {
+                dropArea.addEventListener(eventName, (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    dropArea.classList.add('highlight');
+                });
+            });
+
+            ['dragleave', 'drop'].forEach(eventName => {
+                dropArea.addEventListener(eventName, (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    dropArea.classList.remove('highlight');
+                });
+            });
+
+            // ドロップ処理
+            dropArea.addEventListener('drop', (e) => {
+                const files = e.dataTransfer.files;
+                if (files.length > 0) {
+                    handleFile(files[0]);
+                }
+            });
+
+            // クリックでファイル選択
+            dropArea.addEventListener('click', () => {
+                fileInput.click();
+            });
+
+            fileInput.addEventListener('change', (e) => {
+                if (e.target.files.length > 0) {
+                    handleFile(e.target.files[0]);
+                }
+            });
+        });
+    }
+    waitForFile();
+    """
+
+    # eval_jsでJavaScriptを実行し、結果を待つ
+    result = output.eval_js(js_code)
+
+    if result:
+        file_data = json.loads(result)
+        file_bytes = base64.b64decode(file_data['data'])
+        return file_data['name'], file_bytes
+    else:
+        return None, None
+
+
+def main():
+    print("=" * 60)
+    print("団体別名簿PDF生成（修正版v4.1 - ドラッグ＆ドロップ対応）")
+    print("=" * 60)
+
+    # ドラッグ＆ドロップ対応ファイルアップロード
+    print("\n【ステップ1】データファイル(Excelファイル)をアップロードしてください")
+
+    excel_filename, file_bytes = upload_file_with_drag_drop()
+
+    if not excel_filename or not file_bytes:
+        print("❌ ファイルがアップロードされませんでした")
+        return
+
+    print(f"✓ {excel_filename} をアップロードしました")
+
+    # パスワード入力
+    print("\n【ステップ2】データファイルのパスワードを入力してください")
+    excel_password = input("パスワード: ")
+
+    # 復号化
+    print("\n【ステップ3】ファイルを復号化しています...")
+    try:
+        decrypted_stream = decrypt_excel_from_bytes(file_bytes, excel_password)
+        wb = load_workbook(decrypted_stream)
+        print("✓ 復号化成功")
+    except Exception as e:
+        print(f"✗ 復号化失敗: {e}")
+        return
+
+    # シート一覧表示
+    print(f"\n【ステップ4】検出されたシート: {len(wb.sheetnames)}個")
+
+    # 処理対象シートの抽出
+    target_sheets = []
+    match_details = []
+
+    for sheet_name in wb.sheetnames:
+        matched_required = find_matching_club_name(sheet_name, REQUIRED_COLUMNS)
+        matched_password = find_matching_club_name(sheet_name, PDF_PASSWORDS)
+
+        if matched_required and matched_password:
+            target_sheets.append(sheet_name)
+            match_details.append({
+                'sheet': sheet_name,
+                'matched_required': matched_required,
+                'matched_password': matched_password
+            })
+
+    print(f"処理対象: {len(target_sheets)}個")
+
+    if match_details:
+        print("\n【マッチング詳細】最初の5件:")
+        for i, detail in enumerate(match_details[:5], 1):
+            print(f"  {i}. シート: {detail['sheet']}")
+            print(f"     設定名: {detail['matched_required']}")
+
+    if not target_sheets:
+        print("\n⚠ 処理する団体がありません")
+        return
+
+    # PDF生成
+    print(f"\n【ステップ5】{len(target_sheets)}個の団体のPDFを生成中...")
+    output_dir = "output_pdfs"
+    os.makedirs(output_dir, exist_ok=True)
+
+    generated_files = []
+    failed_clubs = []
+    role_error_clubs = []  # 役職エラーのある団体を記録
+
+    for i, sheet_name in enumerate(target_sheets, 1):
+        print(f"\n  [{i}/{len(target_sheets)}] {sheet_name} を処理中...")
+        try:
+            ws = wb[sheet_name]
+
+            temp_pdf = f"temp_{sheet_name.replace('/', '_')}.pdf"
+            result = create_pdf_from_sheet(ws, sheet_name, temp_pdf)
+
+            # 役職エラーチェック
+            if result and isinstance(result, dict) and 'error' in result:
+                role_error_clubs.append(result)
+                print(f"  ⚠ 役職エラーがありますが、PDF生成を続行します")
+
+            matched_password_name = find_matching_club_name(sheet_name, PDF_PASSWORDS)
+            password = PDF_PASSWORDS[matched_password_name]
+
+            update_date = datetime.now().strftime('%Y年%m月%d日')
+            final_pdf = os.path.join(output_dir, f"{sheet_name.replace('/', '_')}_{update_date}.pdf")
+            add_password_to_pdf(temp_pdf, final_pdf, password)
+
+            generated_files.append(final_pdf)
+            print(f"  ✓ 完了")
+
+            if os.path.exists(temp_pdf):
+                os.remove(temp_pdf)
+
+        except Exception as e:
+            print(f"  ✗ エラー: {e}")
+            import traceback
+            traceback.print_exc()
+            failed_clubs.append(sheet_name)
+
+    # 結果サマリー
+    print(f"\n{'=' * 60}")
+    print(f"処理結果サマリー")
+    print(f"{'=' * 60}")
+    print(f"成功: {len(generated_files)}個")
+    print(f"失敗: {len(failed_clubs)}個")
+    print(f"役職エラー: {len(role_error_clubs)}個")
+
+    if role_error_clubs:
+        print(f"\n{'=' * 60}")
+        print(f"⚠ 役職エラー詳細（主将または会計が見つかりません）")
+        print(f"{'=' * 60}")
+        for i, error_info in enumerate(role_error_clubs, 1):
+            print(f"\n{i}. 団体名: {error_info['club_name']}")
+            print(f"   エラー: {error_info['error']}")
+            print(f"   検出された役職: {', '.join(error_info['roles'][:10])}")
+
+    if failed_clubs:
+        print(f"\n{'=' * 60}")
+        print(f"【処理失敗した団体】")
+        print(f"{'=' * 60}")
+        for club in failed_clubs:
+            print(f"  - {club}")
+
+    # ZIP圧縮してダウンロード
+    if generated_files:
+        print(f"\n【ステップ6】{len(generated_files)}個のPDFをZIP圧縮中...")
+        zip_filename = f"団体別名簿_{datetime.now().strftime('%Y%m%d')}.zip"
+
+        with zipfile.ZipFile(zip_filename, 'w') as zipf:
+            for pdf_file in generated_files:
+                zipf.write(pdf_file, os.path.basename(pdf_file))
+
+        print(f"✓ {zip_filename} を作成しました")
+        print("\n【完了】ダウンロードを開始します...")
+        colab_files.download(zip_filename)
+
+        print(f"\n{'=' * 60}")
+        print(f"処理が完了しました! {len(generated_files)}個のPDFを生成しました")
+        if role_error_clubs:
+            print(f"※ {len(role_error_clubs)}個の団体で役職エラーが検出されました（上記参照）")
+        print(f"{'=' * 60}")
+    else:
+        print("\n⚠ PDFが生成されませんでした")
+
+# 実行
+main()
