@@ -1,0 +1,321 @@
+// ===== スポーツフェスティバル申込フォーム管理スクリプト =====
+// 既存セクション「〇〇の参加者が定員に達しました」「〇〇に参加する方への質問です」に対応
+
+// ===== 競技データ定義 =====
+const SPORT_DATA = [
+  { name: 'フットサル', key: 'futsal', limit: 15, icon: '⚽' },
+  { name: 'バスケットボール', key: 'basketball', limit: 10, icon: '🏀' },
+  { name: 'バドミントン', key: 'badminton', limit: 16, icon: '🏸' },
+  { name: '卓球', key: 'tabletennis', limit: 20, icon: '🏓' },
+  { name: 'ソフトボール', key: 'softball', limit: 10, icon: '🥎' },
+  { name: 'ソフトテニス', key: 'softtennis', limit: 12, icon: '🎾' },
+  { name: 'ビーチバレー', key: 'beachvolley', limit: 8, icon: '🏐' },
+  { name: 'ドッジボール', key: 'dodgeball', limit: 12, icon: '🔴' },
+  { name: 'eスポーツ', key: 'esports', limit: 50, icon: '🎮' }
+];
+
+// セクション識別用キーワード（既存のタイトル形式に合わせる）
+const SECTION_KEYWORD = {
+  FULL: '定員に達しました',      // 満員用セクション
+  OPEN: '参加する方への質問'     // 通常用セクション
+};
+
+// ===== フォーム送信時に自動実行 =====
+function onFormSubmit(e) {
+  updateFormQuestions();
+}
+
+// ===== 手動実行用：フォーム更新 =====
+function manualUpdate() {
+  updateFormQuestions();
+}
+
+// ===== メイン処理：フォームの質問と分岐を更新 =====
+function updateFormQuestions() {
+  const form = FormApp.getActiveForm();
+  const counts = getTeamCounts();
+  
+  Logger.log('===== フォーム更新開始 =====');
+  Logger.log('現在のチーム数: ' + JSON.stringify(counts));
+  
+  // 競技選択の質問を取得
+  const sportItem = findSportSelectionItem(form);
+  if (!sportItem) {
+    Logger.log('エラー: 競技選択質問が見つかりません');
+    return;
+  }
+  
+  // 各競技のセクションを取得
+  const sections = getAllSportSections(form);
+  Logger.log('取得したセクション: ' + JSON.stringify(Object.keys(sections)));
+  
+  // 選択肢と分岐を更新
+  const newChoices = [];
+  const fullSports = [];
+  
+  SPORT_DATA.forEach(sport => {
+    const count = counts[sport.key];
+    const isFull = count >= sport.limit;
+    
+    // 選択肢のテキストを作成
+    let choiceText;
+    if (isFull) {
+      choiceText = sport.icon + sport.name + '（定員に達しました）';
+      fullSports.push(sport.name);
+    } else {
+      choiceText = sport.icon + sport.name + '（申込件数：' + count + '/' + sport.limit + '）';
+    }
+    
+    // 分岐先のセクションを決定
+    const targetSectionKey = sport.key + (isFull ? '_FULL' : '_OPEN');
+    const targetSection = sections[targetSectionKey];
+    
+    if (targetSection) {
+      // 分岐付きの選択肢を作成
+      const choice = sportItem.createChoice(choiceText, targetSection);
+      newChoices.push(choice);
+      Logger.log(sport.name + ': ' + count + '/' + sport.limit + (isFull ? ' 【満員】' : '') + ' → ' + targetSectionKey);
+    } else {
+      // セクションが見つからない場合は分岐なしで追加
+      Logger.log('警告: ' + sport.name + 'のセクションが見つかりません（' + targetSectionKey + '）');
+      newChoices.push(sportItem.createChoice(choiceText));
+    }
+  });
+  
+  // 選択肢を更新
+  sportItem.setChoices(newChoices);
+  
+  Logger.log('===== フォーム更新完了 =====');
+  Logger.log('満員の競技: ' + (fullSports.length > 0 ? fullSports.join(', ') : 'なし'));
+}
+
+// ===== 競技選択の質問を探す =====
+function findSportSelectionItem(form) {
+  const items = form.getItems();
+  
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.getType() === FormApp.ItemType.MULTIPLE_CHOICE) {
+      const title = item.getTitle();
+      if (title.includes('競技')) {
+        return item.asMultipleChoiceItem();
+      }
+    }
+  }
+  
+  return null;
+}
+
+// ===== 全競技のセクションを取得 =====
+function getAllSportSections(form) {
+  const items = form.getItems();
+  const sections = {};
+  
+  items.forEach(item => {
+    if (item.getType() === FormApp.ItemType.PAGE_BREAK) {
+      const pageBreak = item.asPageBreakItem();
+      const title = pageBreak.getTitle();
+      
+      SPORT_DATA.forEach(sport => {
+        // この競技のセクションかチェック
+        if (title.includes(sport.name) || title.includes(sport.icon + sport.name)) {
+          // 満員用セクション
+          if (title.includes(SECTION_KEYWORD.FULL)) {
+            sections[sport.key + '_FULL'] = pageBreak;
+            Logger.log('発見 [満員用]: ' + title);
+          }
+          // 通常用セクション
+          else if (title.includes(SECTION_KEYWORD.OPEN)) {
+            sections[sport.key + '_OPEN'] = pageBreak;
+            Logger.log('発見 [通常用]: ' + title);
+          }
+        }
+      });
+    }
+  });
+  
+  return sections;
+}
+
+// ===== スプレッドシートからチーム数を取得 =====
+function getTeamCounts() {
+  try {
+    const form = FormApp.getActiveForm();
+    const destinationId = form.getDestinationId();
+    
+    if (!destinationId) {
+      Logger.log('警告: スプレッドシートがリンクされていません');
+      return getDefaultCounts();
+    }
+    
+    const ss = SpreadsheetApp.openById(destinationId);
+    const formSheet = ss.getSheetByName('フォームの回答 1');
+    
+    if (!formSheet) {
+      Logger.log('警告:「フォームの回答 1」シートが見つかりません');
+      return getDefaultCounts();
+    }
+    
+    const data = formSheet.getDataRange().getValues();
+    
+    if (data.length < 2) {
+      Logger.log('回答がまだありません');
+      return getDefaultCounts();
+    }
+    
+    const headers = data[0];
+    
+    // 競技選択列を探す
+    let sportColumnIndex = -1;
+    for (let i = 0; i < headers.length; i++) {
+      if (headers[i].includes('競技')) {
+        sportColumnIndex = i;
+        break;
+      }
+    }
+    
+    if (sportColumnIndex === -1) {
+      Logger.log('警告: 競技選択列が見つかりません');
+      return getDefaultCounts();
+    }
+    
+    const counts = getDefaultCounts();
+    
+    // 競技名とキーのマッピング
+    const sportMap = {};
+    SPORT_DATA.forEach(sport => {
+      sportMap[sport.name] = sport.key;
+    });
+    // 略称も追加
+    sportMap['バスケ'] = 'basketball';
+    
+    // 回答をカウント
+    for (let i = 1; i < data.length; i++) {
+      const response = data[i][sportColumnIndex];
+      if (response) {
+        // 複数選択や区切り文字に対応
+        const sports = response.split(/\n|、|,/).map(s => s.trim());
+        sports.forEach(sport => {
+          // 装飾文字を除去して競技名を抽出
+          let cleanSport = sport.replace(/（.*?）/g, '').trim();
+          cleanSport = cleanSport.replace(/⚽|🏀|🏸|🏓|🥎|🎾|🏐|🔴|🎮/g, '').trim();
+          
+          if (sportMap[cleanSport]) {
+            counts[sportMap[cleanSport]]++;
+          }
+        });
+      }
+    }
+    
+    Logger.log('カウント結果: ' + JSON.stringify(counts));
+    return counts;
+    
+  } catch(e) {
+    Logger.log('エラー: ' + e.toString());
+    return getDefaultCounts();
+  }
+}
+
+// ===== デフォルトカウント =====
+function getDefaultCounts() {
+  const counts = {};
+  SPORT_DATA.forEach(sport => {
+    counts[sport.key] = 0;
+  });
+  return counts;
+}
+
+// ===== デバッグ用：現在の状態を確認 =====
+function debugStatus() {
+  const form = FormApp.getActiveForm();
+  
+  Logger.log('===== デバッグ情報 =====');
+  Logger.log('フォーム名: ' + form.getTitle());
+  
+  // スプレッドシート接続確認
+  const destinationId = form.getDestinationId();
+  if (destinationId) {
+    Logger.log('✓ スプレッドシートID: ' + destinationId);
+    const ss = SpreadsheetApp.openById(destinationId);
+    Logger.log('✓ スプレッドシート名: ' + ss.getName());
+  } else {
+    Logger.log('✗ スプレッドシート: 未接続');
+  }
+  
+  // セクション一覧
+  Logger.log('\n--- セクション一覧 ---');
+  const items = form.getItems();
+  let sectionCount = 0;
+  items.forEach((item, idx) => {
+    if (item.getType() === FormApp.ItemType.PAGE_BREAK) {
+      const pb = item.asPageBreakItem();
+      const title = pb.getTitle();
+      let type = '';
+      if (title.includes(SECTION_KEYWORD.FULL)) type = ' [満員用]';
+      else if (title.includes(SECTION_KEYWORD.OPEN)) type = ' [通常用]';
+      Logger.log('セクション' + (++sectionCount) + type + ': ' + title);
+    }
+  });
+  
+  // セクション取得テスト
+  Logger.log('\n--- セクション取得テスト ---');
+  const sections = getAllSportSections(form);
+  SPORT_DATA.forEach(sport => {
+    const hasOpen = sections[sport.key + '_OPEN'] ? '✓' : '✗';
+    const hasFull = sections[sport.key + '_FULL'] ? '✓' : '✗';
+    Logger.log(sport.icon + sport.name + ': 通常=' + hasOpen + ' 満員=' + hasFull);
+  });
+  
+  // 現在のチーム数
+  Logger.log('\n--- 現在のチーム数 ---');
+  const counts = getTeamCounts();
+  SPORT_DATA.forEach(sport => {
+    const count = counts[sport.key];
+    const status = count >= sport.limit ? '【満員】' : '';
+    Logger.log(sport.icon + sport.name + ': ' + count + '/' + sport.limit + ' ' + status);
+  });
+}
+
+// ===== トリガー設定 =====
+function createTrigger() {
+  // 既存のトリガーを削除
+  const triggers = ScriptApp.getProjectTriggers();
+  triggers.forEach(trigger => {
+    if (trigger.getHandlerFunction() === 'onFormSubmit') {
+      ScriptApp.deleteTrigger(trigger);
+    }
+  });
+  
+  // 新しいトリガーを作成
+  ScriptApp.newTrigger('onFormSubmit')
+    .forForm(FormApp.getActiveForm())
+    .onFormSubmit()
+    .create();
+  
+  Logger.log('✓ フォーム送信トリガーを作成しました');
+}
+
+// ===== セクション不足チェック =====
+function checkMissingSections() {
+  const form = FormApp.getActiveForm();
+  const sections = getAllSportSections(form);
+  
+  Logger.log('===== セクション不足チェック =====');
+  
+  const missing = [];
+  SPORT_DATA.forEach(sport => {
+    if (!sections[sport.key + '_OPEN']) {
+      missing.push(sport.name + ' [通常用] - タイトルに「' + sport.name + '」と「' + SECTION_KEYWORD.OPEN + '」を含むセクションが必要');
+    }
+    if (!sections[sport.key + '_FULL']) {
+      missing.push(sport.name + ' [満員用] - タイトルに「' + sport.name + '」と「' + SECTION_KEYWORD.FULL + '」を含むセクションが必要');
+    }
+  });
+  
+  if (missing.length === 0) {
+    Logger.log('✓ 全てのセクションが揃っています！');
+  } else {
+    Logger.log('✗ 不足しているセクション:');
+    missing.forEach(m => Logger.log('  - ' + m));
+  }
+}

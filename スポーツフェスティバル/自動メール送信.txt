@@ -1,0 +1,297 @@
+// === 修正版：変更検知をなくし、常に対象行のデータで確認メールを送信するシステム ===
+
+/**
+ * フォーム送信時に実行される関数
+ */
+function onFormSubmit(e) {
+  try {
+    if (!e || !e.values) {
+      console.error('フォーム送信イベントのデータが不完全です');
+      return;
+    }
+
+    const sheet = SpreadsheetApp.getActiveSheet();
+    const submittedValues = e.values; // 送信された値の配列
+    const email = submittedValues[1]; // B列: メールアドレス
+    const selectedSport = submittedValues[3]; // D列: 競技選択
+
+    if (!email || !selectedSport) {
+      console.log('必要なデータ（メールアドレスまたは競技選択）が不足しています');
+      return;
+    }
+    
+    console.log(`フォーム送信処理開始: ${email} - ${selectedSport}`);
+    
+    // 確認メールを送信
+    sendConfirmationEmail(email, selectedSport);
+    
+    // 重複を色付け
+    applyColorCoding(sheet);
+
+  } catch (error) {
+    console.error('onFormSubmitでエラーが発生しました:', error.stack);
+  }
+}
+
+/**
+ * スプレッドシートのセルが編集された時に実行される関数
+ */
+function onEdit(e) {
+  try {
+    if (!e || !e.range) {
+      console.error('編集イベントのデータが不完全です');
+      return;
+    }
+
+    const range = e.range;
+    const row = range.getRow();
+    
+    // ヘッダー行（1行目）は処理しない
+    if (row <= 1) return;
+    
+    const sheet = e.source.getActiveSheet();
+    
+    // 編集された行のデータを取得
+    const rowData = sheet.getRange(row, 1, 1, sheet.getLastColumn()).getValues()[0];
+    const email = rowData[1]; // B列: メールアドレス
+    const selectedSport = rowData[3]; // D列: 競技選択
+    
+    if (!email || !selectedSport) {
+      console.log('必要なデータ（メールアドレスまたは競技選択）が不足しています');
+      return;
+    }
+    
+    console.log(`セル編集処理開始: 行${row}`);
+
+    // 確認メールを送信
+    sendConfirmationEmail(email, selectedSport);
+
+    // 重複を色付け
+    applyColorCoding(sheet);
+
+  } catch (error) {
+    console.error('onEditでエラーが発生しました:', error.stack);
+  }
+}
+
+/**
+ * 参加確認メールを送信する関数（初回・変更の区別なし）
+ */
+function sendConfirmationEmail(email, selectedSport) {
+  try {
+    const subject = '第61回スポーツフェスティバル参加確認';
+    const sportUrls = getSportUrls();
+    const sportUrl = sportUrls[selectedSport] || '';
+    
+    const htmlBody = `
+      <div style="max-width: 600px; margin: 0 auto; font-family: Arial, sans-serif; font-size: 14px; line-height: 1.6; color: #333;">
+        <p style="margin: 10px 0;">スポーツフェスティバル参加者 各位</p>
+        
+        <p style="margin: 15px 0;">千葉工業大学体育会本部<br>
+        スポーツフェスティバル担当です。</p>
+        
+        <p style="margin: 15px 0;">この度はスポーツフェスティバルに参加してくださりありがとうございます。</p>
+        
+        <p style="margin: 15px 0;">本メールに添付いたしました以下のURLは、<br>
+        ${selectedSport}のLINEオープンチャットです。</p>
+        
+        <div style="background-color: #f0f0f0; padding: 10px; margin: 15px 0; border-radius: 5px; word-break: break-all;">
+          <a href="${sportUrl}" target="_blank" style="color: #0066cc; text-decoration: none;">${sportUrl}</a>
+        </div>
+        
+        <p style="margin: 15px 0; padding: 10px; background-color: #ffe6e6; border-left: 4px solid #ff0000; border-radius: 3px;">
+          <span style="font-weight: bold; color: red;">
+          LINEオープンチャットにご参加いただきエントリーは完了となります。
+          </span>
+        </p>
+        
+        <p style="margin: 15px 0;">オープンチャットには代表者1名がチーム名でご参加ください。</p>
+        
+        <p style="margin: 15px 0;">今後、本イベントの連絡は、<br>
+        メールとLINEのオープンチャットを使用しますので、本アドレスをご登録いただき、迷惑メールに振り分けられないようにしてください。</p>
+        
+        <p style="margin: 15px 0;">また、都度ご確認いただきますようお願いいたします。</p>
+        
+        <p style="margin: 15px 0;">不明点等ございましたらこのメールアドレス宛にお送りください。</p>
+        
+        <p style="margin: 15px 0;">以上、よろしくお願いいたします。</p>
+        
+        ${getEmailFooter()}
+      </div>
+    `;
+    
+    GmailApp.sendEmail(email, subject, '', { htmlBody: htmlBody });
+    console.log(`確認メール送信完了: ${email} - ${selectedSport}`);
+
+  } catch (error) {
+    console.error('確認メール送信エラー:', error);
+  }
+}
+
+
+/**
+ * 手動テスト用：指定した行の内容でメール送信を実行する
+ */
+function testEmailForRow(rowNumber) {
+  try {
+    if (!rowNumber) {
+      console.error('行番号が指定されていません。testEmailForRow(5) のように実行してください。');
+      return;
+    }
+    const sheet = SpreadsheetApp.getActiveSheet();
+    const lastRow = sheet.getLastRow();
+    
+    if (rowNumber > lastRow || rowNumber <= 1) {
+      console.log(`エラー: 行${rowNumber}は無効です（1行目以降、最終行: ${lastRow}まで）`);
+      return;
+    }
+    
+    const rowData = sheet.getRange(rowNumber, 1, 1, sheet.getLastColumn()).getValues()[0];
+    
+    const email = rowData[1];
+    const selectedSport = rowData[3];
+    
+    if (email && selectedSport) {
+      sendConfirmationEmail(email, selectedSport);
+      console.log(`テストメール送信完了 - 行${rowNumber}: ${email}`);
+    } else {
+      console.log(`エラー: 行${rowNumber}にメールアドレスまたは競技選択がありません`);
+    }
+
+  } catch (error) {
+    console.error(`テストメール送信でエラーが発生しました (行${rowNumber}):`, error);
+  }
+}
+
+/**
+ * 色付け機能（メールアドレスやチーム名の重複を色分け）
+ */
+function applyColorCoding(sheet) {
+  try {
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) return;
+    
+    const dataRange = sheet.getRange(2, 1, lastRow - 1, sheet.getLastColumn());
+    const data = dataRange.getValues();
+    const colors = [
+      '#FFE6E6', '#E6F3FF', '#E6FFE6', '#FFF3E0', '#F3E5F5',
+      '#E8F5E8', '#FFF8E1', '#FCE4EC', '#E3F2FD', '#F1F8E9'
+    ];
+    
+    const emailColorMap = new Map();
+    const teamColorMap = new Map();
+    let colorIndex = 0;
+    
+    // 各メールアドレスとチーム名に色を割り当てる
+    data.forEach(row => {
+      const email = row[1]; // B列
+      const teamName = row[4]; // E列
+
+      if (email && !emailColorMap.has(email)) {
+        emailColorMap.set(email, colors[colorIndex % colors.length]);
+        colorIndex++;
+      }
+      if (teamName && !teamColorMap.has(teamName)) {
+        teamColorMap.set(teamName, colors[colorIndex % colors.length]);
+        colorIndex++;
+      }
+    });
+
+    // 全行の背景色を一度リセット
+    dataRange.setBackground(null);
+    
+    const backgrounds = [];
+    // 色を適用する行を決定
+    for (let i = 0; i < data.length; i++) {
+      const rowData = data[i];
+      const email = rowData[1];
+      const teamName = rowData[4];
+      let backgroundColor = null;
+
+      // メールアドレスが重複しているかチェック
+      const emailCount = data.filter(row => row[1] === email).length;
+      if (emailCount > 1) {
+        backgroundColor = emailColorMap.get(email);
+      }
+      // チーム名が重複しているかチェック
+      else if (teamName) {
+        const teamCount = data.filter(row => row[4] === teamName).length;
+        if (teamCount > 1) {
+          backgroundColor = teamColorMap.get(teamName);
+        }
+      }
+      
+      const rowBackgrounds = new Array(sheet.getLastColumn()).fill(backgroundColor);
+      backgrounds.push(rowBackgrounds);
+    }
+    
+    // 背景色をまとめて適用
+    if (backgrounds.length > 0) {
+      dataRange.setBackgrounds(backgrounds);
+    }
+    
+    console.log('色付け完了');
+
+  } catch (error) {
+    console.error('色付け処理でエラーが発生しました:', error);
+  }
+}
+
+/**
+ * 競技別のLINEオープンチャットURLを取得する
+ */
+function getSportUrls() {
+  return {
+    'フットサル': 'https://line.me/ti/g2/BhEOvsmR_PaKjMFGl0X8NCJPHNc8GKjSgGtuug?utm_source=invitation&utm_medium=link_copy&utm_campaign=default',
+    'バスケットボール': 'https://line.me/ti/g2/ImU4qD79q2KWkz0NxxhoSNVGU_baA3ymHh1muQ?utm_source=invitation&utm_medium=link_copy&utm_campaign=default',
+    'バドミントン': 'https://line.me/ti/g2/t-UThGzEGhFGueDV8y_dMgmiq-XhAnhYpGFEsg?utm_source=invitation&utm_medium=link_copy&utm_campaign=default',
+    '卓球': 'https://line.me/ti/g2/TRm39hNiDTwkkku-jArg6OFQjH1008PXWoLWOw?utm_source=invitation&utm_medium=link_copy&utm_campaign=default',
+    'ソフトボール': 'https://line.me/ti/g2/n4dujeTAQ9oRQ9aVRg9dUvOXROSfoJ6Yy-bgcg?utm_source=invitation&utm_medium=link_copy&utm_campaign=default',
+    'ソフトテニス': 'https://line.me/ti/g2/CNEA1Vi_HKw1WWu3CxgmCZtekmsEKMu_UTatOw?utm_source=invitation&utm_medium=link_copy&utm_campaign=default',
+    'ビーチバレー': 'https://line.me/ti/g2/-Udt_h7KH7ACxa3Sk_ICKoA9M5Pq3R6eBgevUQ?utm_source=invitation&utm_medium=link_copy&utm_campaign=default',
+    'ドッジボール': 'https://line.me/ti/g2/EdX1FSu9MWu7elYlzMruHAFzzjSzrPlDNkm9Og?utm_source=invitation&utm_medium=link_copy&utm_campaign=default',
+    'eスポーツ': 'https://line.me/ti/g2/2fXGlmo47-I--cbxjyXIWFGNB2SpibXNkq6vDw?utm_source=invitation&utm_medium=link_copy&utm_campaign=default'
+  };
+}
+
+/**
+ * メールフッター（署名）を取得する
+ */
+function getEmailFooter() {
+  return `
+    <hr style="border: none; border-top: 1px solid #ccc; margin: 20px 0;">
+    <div style="background-color: #f9f9f9; padding: 15px; border-radius: 5px; margin: 20px 0;">
+      <p style="margin: 5px 0; font-size: 13px;">千葉工業大学 体育会本部 スポーツフェスティバル担当<br>
+      TEL：047-478-0251<br>
+      e-mail：cit.taiiku.event@gmail.com</p>
+      <p style="margin: 10px 0 5px 0;">
+        <a href="https://sites.google.com/view/cittaiiku2021hp/%E5%B9%B4%E9%96%93%E8%A1%8C%E4%BA%8B%E4%BA%88%E5%AE%9A/%E3%82%B9%E3%83%9D%E3%83%BC%E3%83%84%E3%83%95%E3%82%A7%E3%82%B9%E3%83%86%E3%82%A3%E3%83%90%E3%83%AB?authuser=0" 
+           target="_blank" style="color: #0066cc; text-decoration: none; font-weight: bold;">
+          体育会本部HP-スポーツフェスティバル
+        </a>
+      </p>
+    </div>
+  `;
+}
+
+/**
+ * トリガーをセットアップする関数
+ */
+function setupTriggers() {
+  try {
+    const triggers = ScriptApp.getProjectTriggers();
+    triggers.forEach(trigger => ScriptApp.deleteTrigger(trigger));
+    
+    ScriptApp.newTrigger('onFormSubmit').forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet()).onFormSubmit().create();
+    ScriptApp.newTrigger('onEdit').forSpreadsheet(SpreadsheetApp.getActiveSpreadsheet()).onEdit().create();
+    
+    console.log('トリガー設定完了: onFormSubmit と onEdit が設定されました。');
+  } catch (error) {
+    console.error('トリガー設定でエラーが発生しました:', error);
+  }
+}
+
+function myFunctionTest() {
+  // ↓ここの数字をテストしたい行番号に変えてください
+  testEmailForRow(64); 
+}
