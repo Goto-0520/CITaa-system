@@ -1,0 +1,1475 @@
+/**
+ * ============================================
+ * 体育会本部 統合入部管理システム
+ * ============================================
+ * 
+ * 【機能概要】
+ * - 入部届・幹部変更届・退部届の一元管理
+ * - 団体別スプレッドシートへの自動振り分け
+ * - 団体の加盟・脱退管理
+ * - 月次パスワード自動変更
+ * 
+ * 【シート構成】
+ * - 設定シート: 団体一覧、メールアドレス、SS ID管理
+ * - 各団体別SS: 入部者/幹部変更/退部者（3つずつ）
+ */
+
+// ============================================
+// 📌 設定
+// ============================================
+
+const CONFIG = {
+  // 管理者メールアドレス
+  ADMIN_EMAIL: 'cit.taiiku@gmail.com',
+  
+  // フォームID（セットアップ後に自動設定される）
+  ENTRY_FORM_ID: '',      // 入部届フォーム
+  STAFF_FORM_ID: '',      // 幹部変更届フォーム
+  EXIT_FORM_ID: '',       // 退部届フォーム
+  
+  // シート名
+  SETTINGS_SHEET: '設定',
+  
+  // 設定シートの列
+  COL_CLUB_NAME: 1,       // A列: 団体名
+  COL_CLUB_EMAIL: 2,      // B列: メールアドレス
+  COL_SS_ID: 3,           // C列: スプレッドシートID
+  COL_STATUS: 4,          // D列: ステータス（有効/脱退）
+  
+  // フォームの団体選択列（0始まり）
+  FORM_CLUB_COLUMN: 2,    // C列: 団体名
+  FORM_EMAIL_COLUMN: 1,   // B列: メールアドレス
+};
+
+// ============================================
+// 📋 カスタムメニュー
+// ============================================
+
+function onOpen() {
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('🏢 団体管理')
+    .addItem('➕ 団体を追加', 'addNewClub')
+    .addItem('➖ 団体を削除（アーカイブ）', 'removeClub')
+    .addSeparator()
+    .addItem('📋 団体一覧を表示', 'showClubList')
+    .addItem('🔄 団体情報を更新', 'updateClubInfo')
+    .addToUi();
+  
+  ui.createMenu('⚙️ システム管理')
+    .addItem('🚀 初期セットアップ', 'setupSystem')
+    .addItem('📝 フォーム作成', 'createAllForms')
+    .addItem('📊 全団体SSを一括作成', 'createAllClubSpreadsheets')
+    .addItem('⏰ トリガー設定', 'setupTriggers')
+    .addSeparator()
+    .addItem('🔑 パスワード変更（手動）', 'changePasswordManually')
+    .addItem('🧹 一時ファイル削除', 'cleanupTempFolder')
+    .addToUi();
+  
+  ui.createMenu('📧 手動処理')
+    .addItem('🔄 選択行を再処理', 'processSelectedRow')
+    .addItem('📧 選択行にメール送信', 'sendEmailForSelectedRow')
+    .addToUi();
+}
+
+// ============================================
+// 🚀 初期セットアップ
+// ============================================
+
+function setupSystem() {
+  const ui = SpreadsheetApp.getUi();
+  
+  ui.alert(
+    '🚀 初期セットアップ',
+    'システムのセットアップを開始します。\n\n' +
+    '以下の順序で進めます：\n' +
+    '1. 設定シートの確認・作成\n' +
+    '2. フォーム3種の作成\n' +
+    '3. 団体別スプレッドシートの作成\n' +
+    '4. トリガーの設定\n\n' +
+    '続行しますか？',
+    ui.ButtonSet.OK_CANCEL
+  );
+  
+  try {
+    // Step 1: 設定シート確認
+    ui.alert('ステップ 1/4', '設定シートを確認・作成します...', ui.ButtonSet.OK);
+    setupSettingsSheet();
+    console.log('✅ Step 1: 設定シート確認完了');
+    
+    // Step 2: 団体一覧入力確認
+    const hasClubs = checkClubsExist();
+    if (!hasClubs) {
+      ui.alert(
+        '団体登録が必要',
+        '設定シートに団体一覧を入力してください。\n\n' +
+        'A列: 団体名\n' +
+        'B列: メールアドレス\n\n' +
+        '入力後、再度セットアップを実行してください。',
+        ui.ButtonSet.OK
+      );
+      return;
+    }
+    
+    // Step 3: フォーム作成
+    const createForms = ui.alert(
+      'ステップ 2/4',
+      'フォームを自動作成しますか？\n（既存フォームがある場合はスキップ可能）',
+      ui.ButtonSet.YES_NO
+    );
+    if (createForms === ui.Button.YES) {
+      createAllForms();
+      console.log('✅ Step 2: フォーム作成完了');
+    }
+    
+    // Step 4: 団体別SS作成
+    const createSS = ui.alert(
+      'ステップ 3/4',
+      '団体別スプレッドシートを一括作成しますか？\n' +
+      '（各団体に3つずつ作成されます）',
+      ui.ButtonSet.YES_NO
+    );
+    if (createSS === ui.Button.YES) {
+      createAllClubSpreadsheets();
+      console.log('✅ Step 3: スプレッドシート作成完了');
+    }
+    
+    // Step 5: トリガー設定
+    const setupTrig = ui.alert(
+      'ステップ 4/4',
+      'トリガーを設定しますか？\n' +
+      '・フォーム送信トリガー\n' +
+      '・月次パスワード変更トリガー\n' +
+      '・定期クリーンアップトリガー',
+      ui.ButtonSet.YES_NO
+    );
+    if (setupTrig === ui.Button.YES) {
+      setupTriggers();
+      console.log('✅ Step 4: トリガー設定完了');
+    }
+    
+    ui.alert(
+      '🎉 セットアップ完了',
+      'システムのセットアップが完了しました！\n\n' +
+      '次のステップ：\n' +
+      '1. 各フォームのURLを確認\n' +
+      '2. 団体へパスワードとリンクを通知\n' +
+      '3. 動作テスト',
+      ui.ButtonSet.OK
+    );
+    
+  } catch (error) {
+    console.error('❌ セットアップエラー:', error);
+    ui.alert('エラー', 'セットアップ中にエラーが発生しました:\n' + error.toString(), ui.ButtonSet.OK);
+  }
+}
+
+// ============================================
+// 📊 設定シート管理
+// ============================================
+
+function setupSettingsSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let settingsSheet = ss.getSheetByName(CONFIG.SETTINGS_SHEET);
+  
+  if (!settingsSheet) {
+    settingsSheet = ss.insertSheet(CONFIG.SETTINGS_SHEET);
+    
+    // ヘッダー設定
+    const headers = ['団体名', 'メールアドレス', 'スプレッドシートID', 'ステータス'];
+    settingsSheet.getRange(1, 1, 1, headers.length).setValues([headers]);
+    settingsSheet.getRange(1, 1, 1, headers.length)
+      .setBackground('#4285F4')
+      .setFontColor('#FFFFFF')
+      .setFontWeight('bold');
+    
+    // 列幅調整
+    settingsSheet.setColumnWidth(1, 200);
+    settingsSheet.setColumnWidth(2, 250);
+    settingsSheet.setColumnWidth(3, 350);
+    settingsSheet.setColumnWidth(4, 100);
+    
+    console.log('✅ 設定シートを作成しました');
+  }
+  
+  return settingsSheet;
+}
+
+function checkClubsExist() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const settingsSheet = ss.getSheetByName(CONFIG.SETTINGS_SHEET);
+  
+  if (!settingsSheet) return false;
+  
+  const lastRow = settingsSheet.getLastRow();
+  return lastRow > 1; // ヘッダー以外にデータがある
+}
+
+function getClubSettings() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const settingsSheet = ss.getSheetByName(CONFIG.SETTINGS_SHEET);
+  
+  if (!settingsSheet) return [];
+  
+  const lastRow = settingsSheet.getLastRow();
+  if (lastRow < 2) return [];
+  
+  const data = settingsSheet.getRange(2, 1, lastRow - 1, 4).getValues();
+  
+  return data
+    .filter(row => row[0] && row[3] !== '脱退')
+    .map(row => ({
+      name: row[0],
+      email: row[1],
+      ssId: row[2],
+      status: row[3] || '有効'
+    }));
+}
+
+function getActiveClubs() {
+  return getClubSettings().map(club => club.name);
+}
+
+function saveClubSpreadsheetId(clubName, ssId) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const settingsSheet = ss.getSheetByName(CONFIG.SETTINGS_SHEET);
+  
+  const lastRow = settingsSheet.getLastRow();
+  const data = settingsSheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  
+  for (let i = 0; i < data.length; i++) {
+    if (data[i][0] === clubName) {
+      const rowNum = i + 2;
+      settingsSheet.getRange(rowNum, CONFIG.COL_SS_ID).setValue(ssId);
+      settingsSheet.getRange(rowNum, CONFIG.COL_STATUS).setValue('有効');
+      return;
+    }
+  }
+}
+
+// ============================================
+// 🏢 団体管理機能
+// ============================================
+
+function addNewClub() {
+  const ui = SpreadsheetApp.getUi();
+  
+  // 団体名入力
+  const nameResponse = ui.prompt(
+    '➕ 団体追加',
+    '追加する団体名を入力してください：',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (nameResponse.getSelectedButton() !== ui.Button.OK) return;
+  const clubName = nameResponse.getResponseText().trim();
+  
+  if (!clubName) {
+    ui.alert('エラー', '団体名を入力してください。', ui.ButtonSet.OK);
+    return;
+  }
+  
+  // 重複チェック
+  const existingClubs = getActiveClubs();
+  if (existingClubs.includes(clubName)) {
+    ui.alert('エラー', `「${clubName}」は既に登録されています。`, ui.ButtonSet.OK);
+    return;
+  }
+  
+  // メールアドレス入力
+  const emailResponse = ui.prompt(
+    '➕ 団体追加',
+    `「${clubName}」のメールアドレスを入力してください：`,
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (emailResponse.getSelectedButton() !== ui.Button.OK) return;
+  const clubEmail = emailResponse.getResponseText().trim();
+  
+  if (!clubEmail || !clubEmail.includes('@')) {
+    ui.alert('エラー', '有効なメールアドレスを入力してください。', ui.ButtonSet.OK);
+    return;
+  }
+  
+  // 確認
+  const confirm = ui.alert(
+    '確認',
+    `以下の内容で団体を追加します：\n\n` +
+    `団体名：${clubName}\n` +
+    `メール：${clubEmail}\n\n` +
+    `続行しますか？`,
+    ui.ButtonSet.YES_NO
+  );
+  if (confirm !== ui.Button.YES) return;
+  
+  try {
+    // 1. 設定シートに追加
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const settingsSheet = ss.getSheetByName(CONFIG.SETTINGS_SHEET);
+    settingsSheet.appendRow([clubName, clubEmail, '', '有効']);
+    
+    // 2. フォームに選択肢追加
+    addClubToForms(clubName);
+    
+    // 3. スプレッドシート作成＆権限付与
+    const ssId = createClubSpreadsheet(clubName, clubEmail);
+    
+    // 4. SS IDを保存
+    saveClubSpreadsheetId(clubName, ssId);
+    
+    ui.alert(
+      '✅ 追加完了',
+      `「${clubName}」を追加しました！\n\n` +
+      `スプレッドシート：\nhttps://docs.google.com/spreadsheets/d/${ssId}`,
+      ui.ButtonSet.OK
+    );
+    
+  } catch (error) {
+    console.error('❌ 団体追加エラー:', error);
+    ui.alert('エラー', '団体追加中にエラーが発生しました:\n' + error.toString(), ui.ButtonSet.OK);
+  }
+}
+
+function removeClub() {
+  const ui = SpreadsheetApp.getUi();
+  const clubs = getActiveClubs();
+  
+  if (clubs.length === 0) {
+    ui.alert('情報', '登録されている団体がありません。', ui.ButtonSet.OK);
+    return;
+  }
+  
+  const response = ui.prompt(
+    '➖ 団体削除',
+    `削除する団体名を入力してください：\n\n` +
+    `【現在の団体一覧】\n${clubs.join('\n')}`,
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+  const clubName = response.getResponseText().trim();
+  
+  if (!clubs.includes(clubName)) {
+    ui.alert('エラー', `「${clubName}」は登録されていません。`, ui.ButtonSet.OK);
+    return;
+  }
+  
+  const confirm = ui.alert(
+    '⚠️ 確認',
+    `「${clubName}」を削除しますか？\n\n` +
+    `※データは保持され、後から復元可能です。`,
+    ui.ButtonSet.YES_NO
+  );
+  if (confirm !== ui.Button.YES) return;
+  
+  try {
+    // 1. フォームから選択肢削除
+    removeClubFromForms(clubName);
+    
+    // 2. 設定シートのステータスを「脱退」に変更
+    updateClubStatus(clubName, '脱退');
+    
+    ui.alert('✅ 削除完了', `「${clubName}」をアーカイブしました。`, ui.ButtonSet.OK);
+    
+  } catch (error) {
+    console.error('❌ 団体削除エラー:', error);
+    ui.alert('エラー', '団体削除中にエラーが発生しました:\n' + error.toString(), ui.ButtonSet.OK);
+  }
+}
+
+function updateClubStatus(clubName, status) {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const settingsSheet = ss.getSheetByName(CONFIG.SETTINGS_SHEET);
+  
+  const lastRow = settingsSheet.getLastRow();
+  const data = settingsSheet.getRange(2, 1, lastRow - 1, 1).getValues();
+  
+  for (let i = 0; i < data.length; i++) {
+    if (data[i][0] === clubName) {
+      settingsSheet.getRange(i + 2, CONFIG.COL_STATUS).setValue(status);
+      return;
+    }
+  }
+}
+
+function showClubList() {
+  const clubs = getClubSettings();
+  const ui = SpreadsheetApp.getUi();
+  
+  if (clubs.length === 0) {
+    ui.alert('団体一覧', '登録されている団体がありません。', ui.ButtonSet.OK);
+    return;
+  }
+  
+  const list = clubs.map((club, index) => 
+    `${index + 1}. ${club.name}\n   📧 ${club.email}\n   📊 SS: ${club.ssId ? '設定済み' : '未設定'}`
+  ).join('\n\n');
+  
+  ui.alert('📋 団体一覧', `登録団体数: ${clubs.length}\n\n${list}`, ui.ButtonSet.OK);
+}
+
+// ============================================
+// 📝 フォーム操作
+// ============================================
+
+function createAllForms() {
+  const ui = SpreadsheetApp.getUi();
+  const clubs = getActiveClubs();
+  
+  if (clubs.length === 0) {
+    ui.alert('エラー', '先に設定シートに団体一覧を入力してください。', ui.ButtonSet.OK);
+    return;
+  }
+  
+  try {
+    // マスタースプレッドシートの親フォルダを取得
+    const masterSSId = SpreadsheetApp.getActiveSpreadsheet().getId();
+    const masterFile = DriveApp.getFileById(masterSSId);
+    const parentFolders = masterFile.getParents();
+    const targetFolder = parentFolders.hasNext() ? parentFolders.next() : DriveApp.getRootFolder();
+    
+    // 入部届フォーム
+    const entryForm = createEntryForm(clubs);
+    moveFormToFolder(entryForm, targetFolder);
+    console.log('✅ 入部届フォーム作成:', entryForm.getId());
+    
+    // 幹部変更届フォーム
+    const staffForm = createStaffForm(clubs);
+    moveFormToFolder(staffForm, targetFolder);
+    console.log('✅ 幹部変更届フォーム作成:', staffForm.getId());
+    
+    // 退部届フォーム
+    const exitForm = createExitForm(clubs);
+    moveFormToFolder(exitForm, targetFolder);
+    console.log('✅ 退部届フォーム作成:', exitForm.getId());
+    
+    // フォームIDを保存
+    const scriptProperties = PropertiesService.getScriptProperties();
+    scriptProperties.setProperty('ENTRY_FORM_ID', entryForm.getId());
+    scriptProperties.setProperty('STAFF_FORM_ID', staffForm.getId());
+    scriptProperties.setProperty('EXIT_FORM_ID', exitForm.getId());
+    
+    ui.alert(
+      '✅ フォーム作成完了',
+      `3つのフォームを作成しました：\n\n` +
+      `【入部届】\n${entryForm.getPublishedUrl()}\n\n` +
+      `【幹部変更届】\n${staffForm.getPublishedUrl()}\n\n` +
+      `【退部届】\n${exitForm.getPublishedUrl()}\n\n` +
+      `⚠️ 入部届フォームの「学生証画像」項目を\n` +
+      `手動でファイルアップロードに変更してください。`,
+      ui.ButtonSet.OK
+    );
+    
+  } catch (error) {
+    console.error('❌ フォーム作成エラー:', error);
+    ui.alert('エラー', 'フォーム作成中にエラーが発生しました:\n' + error.toString(), ui.ButtonSet.OK);
+  }
+}
+
+function moveFormToFolder(form, folder) {
+  const formFile = DriveApp.getFileById(form.getId());
+  folder.addFile(formFile);
+  DriveApp.getRootFolder().removeFile(formFile);
+}
+
+function createEntryForm(clubs) {
+  const form = FormApp.create('【体育会本部】入部届');
+  
+  form.setDescription(
+    '入部届フォームです。\n' +
+    '※回答内容を確認してから送信してください。\n' +
+    '※間違えた場合は再度送信してください（上書きされます）。'
+  );
+  
+  // ============================
+  // セクション1: パスワード入力
+  // ============================
+  const passwordItem = form.addTextItem();
+  passwordItem.setTitle('パスワード')
+    .setRequired(true)
+    .setHelpText('団体から通知されたパスワードを入力してください。');
+  
+  // ページ区切り → セクション2へ
+  const page2 = form.addPageBreakItem();
+  page2.setTitle('団体選択');
+  
+  // ============================
+  // セクション2: 団体選択
+  // ============================
+  const sortedClubs = [...clubs].sort((a, b) => a.localeCompare(b, 'ja'));
+  const clubItem = form.addListItem();
+  clubItem.setTitle('入部希望団体')
+    .setRequired(true)
+    .setHelpText('所属する団体を選択してください。\n※五十音順に並んでいます。')
+    .setChoiceValues(sortedClubs);
+  
+  // ページ区切り → セクション3へ
+  const page3 = form.addPageBreakItem();
+  page3.setTitle('確認');
+  
+  // ============================
+  // セクション3: 確認
+  // ============================
+  const confirmItem = form.addMultipleChoiceItem();
+  confirmItem.setTitle('選択した団体で間違いありませんか？')
+    .setRequired(true)
+    .setHelpText('間違いがある場合は「戻る」ボタンで前のページに戻ってください。')
+    .setChoices([
+      confirmItem.createChoice('はい、間違いありません')
+    ]);
+  
+  // ページ区切り → セクション4へ
+  const page4 = form.addPageBreakItem();
+  page4.setTitle('個人情報入力');
+  
+  // ============================
+  // セクション4: 個人情報入力
+  // ============================
+  form.addTextItem()
+    .setTitle('学生番号')
+    .setRequired(true)
+    .setHelpText('例: 24A2095');
+  
+  form.addTextItem()
+    .setTitle('氏名')
+    .setRequired(true)
+    .setHelpText('例: 山田太郎');
+  
+  form.addTextItem()
+    .setTitle('携帯電話番号')
+    .setRequired(true)
+    .setHelpText('例: 090-1234-5678');
+  
+  // ページ区切り → セクション5へ
+  const page5 = form.addPageBreakItem();
+  page5.setTitle('保護者情報・学生証');
+  
+  // ============================
+  // セクション5: 保護者情報・学生証
+  // ============================
+  form.addTextItem()
+    .setTitle('保護者 - 学生番号')
+    .setRequired(true);
+  
+  form.addTextItem()
+    .setTitle('保護者 - 氏名')
+    .setRequired(true);
+  
+  // ※ファイルアップロードはGASから追加できないため、プレースホルダーを設置
+  form.addTextItem()
+    .setTitle('【要手動設定】学生証画像')
+    .setRequired(false)
+    .setHelpText('⚠️ この項目は後で手動でファイルアップロードに変更してください');
+  
+  // 設定
+  form.setCollectEmail(true);
+  form.setLimitOneResponsePerUser(false);
+  form.setAllowResponseEdits(false);
+  form.setShowLinkToRespondAgain(true);
+  form.setProgressBar(true); // 進行状況バー表示
+  
+  return form;
+}
+
+function createStaffForm(clubs) {
+  const form = FormApp.create('【体育会本部】幹部変更届');
+  
+  form.setDescription(
+    '幹部変更届フォームです。\n' +
+    '※回答内容を確認してから送信してください。'
+  );
+  
+  // ============================
+  // セクション1: パスワード入力
+  // ============================
+  form.addTextItem()
+    .setTitle('パスワード')
+    .setRequired(true)
+    .setHelpText('団体から通知されたパスワードを入力してください。');
+  
+  // ページ区切り
+  const page2 = form.addPageBreakItem();
+  page2.setTitle('団体選択');
+  
+  // ============================
+  // セクション2: 団体選択
+  // ============================
+  const sortedClubs = [...clubs].sort((a, b) => a.localeCompare(b, 'ja'));
+  form.addListItem()
+    .setTitle('団体名')
+    .setRequired(true)
+    .setHelpText('所属する団体を選択してください。')
+    .setChoiceValues(sortedClubs);
+  
+  // ページ区切り
+  const page3 = form.addPageBreakItem();
+  page3.setTitle('確認');
+  
+  // ============================
+  // セクション3: 確認
+  // ============================
+  const confirmItem = form.addMultipleChoiceItem();
+  confirmItem.setTitle('選択した団体で間違いありませんか？')
+    .setRequired(true)
+    .setHelpText('間違いがある場合は「戻る」ボタンで前のページに戻ってください。')
+    .setChoices([
+      confirmItem.createChoice('はい、間違いありません')
+    ]);
+  
+  // ページ区切り
+  const page4 = form.addPageBreakItem();
+  page4.setTitle('幹部情報入力');
+  
+  // ============================
+  // セクション4: 幹部情報入力
+  // ============================
+  form.addTextItem()
+    .setTitle('役職')
+    .setRequired(true)
+    .setHelpText('例: 主将、副主将、マネージャー');
+  
+  form.addTextItem()
+    .setTitle('学生番号')
+    .setRequired(true)
+    .setHelpText('例: 24A2095');
+  
+  form.addTextItem()
+    .setTitle('氏名')
+    .setRequired(true)
+    .setHelpText('例: 山田太郎');
+  
+  form.addTextItem()
+    .setTitle('携帯電話番号')
+    .setRequired(true)
+    .setHelpText('例: 090-1234-5678');
+  
+  // 設定
+  form.setCollectEmail(true);
+  form.setLimitOneResponsePerUser(false);
+  form.setAllowResponseEdits(false);
+  form.setProgressBar(true);
+  
+  return form;
+}
+
+function createExitForm(clubs) {
+  const form = FormApp.create('【体育会本部】退部届');
+  
+  form.setDescription(
+    '退部届フォームです。\n' +
+    '※回答内容を確認してから送信してください。'
+  );
+  
+  // ============================
+  // セクション1: パスワード入力
+  // ============================
+  form.addTextItem()
+    .setTitle('パスワード')
+    .setRequired(true)
+    .setHelpText('団体から通知されたパスワードを入力してください。');
+  
+  // ページ区切り
+  const page2 = form.addPageBreakItem();
+  page2.setTitle('団体選択');
+  
+  // ============================
+  // セクション2: 団体選択
+  // ============================
+  const sortedClubs = [...clubs].sort((a, b) => a.localeCompare(b, 'ja'));
+  form.addListItem()
+    .setTitle('団体名')
+    .setRequired(true)
+    .setHelpText('退部する団体を選択してください。')
+    .setChoiceValues(sortedClubs);
+  
+  // ページ区切り
+  const page3 = form.addPageBreakItem();
+  page3.setTitle('確認');
+  
+  // ============================
+  // セクション3: 確認
+  // ============================
+  const confirmItem = form.addMultipleChoiceItem();
+  confirmItem.setTitle('選択した団体で間違いありませんか？')
+    .setRequired(true)
+    .setHelpText('間違いがある場合は「戻る」ボタンで前のページに戻ってください。')
+    .setChoices([
+      confirmItem.createChoice('はい、間違いありません')
+    ]);
+  
+  // ページ区切り
+  const page4 = form.addPageBreakItem();
+  page4.setTitle('退部者情報入力');
+  
+  // ============================
+  // セクション4: 退部者情報入力
+  // ============================
+  form.addTextItem()
+    .setTitle('学生番号')
+    .setRequired(true)
+    .setHelpText('例: 24A2095');
+  
+  form.addTextItem()
+    .setTitle('氏名')
+    .setRequired(true)
+    .setHelpText('例: 山田太郎');
+  
+  form.addParagraphTextItem()
+    .setTitle('退部理由')
+    .setRequired(false)
+    .setHelpText('任意：退部の理由があればご記入ください。');
+  
+  // 設定
+  form.setCollectEmail(true);
+  form.setLimitOneResponsePerUser(false);
+  form.setAllowResponseEdits(false);
+  form.setProgressBar(true);
+  
+  return form;
+}
+
+function addClubToForms(clubName) {
+  const scriptProperties = PropertiesService.getScriptProperties();
+  const formIds = [
+    scriptProperties.getProperty('ENTRY_FORM_ID'),
+    scriptProperties.getProperty('STAFF_FORM_ID'),
+    scriptProperties.getProperty('EXIT_FORM_ID')
+  ];
+  
+  formIds.forEach(formId => {
+    if (!formId) return;
+    
+    try {
+      const form = FormApp.openById(formId);
+      const items = form.getItems(FormApp.ItemType.LIST);
+      
+      items.forEach(item => {
+        if (item.getTitle().includes('団体')) {
+          const listItem = item.asListItem();
+          const currentChoices = listItem.getChoices().map(c => c.getValue());
+          
+          if (!currentChoices.includes(clubName)) {
+            currentChoices.push(clubName);
+            currentChoices.sort((a, b) => a.localeCompare(b, 'ja'));
+            listItem.setChoiceValues(currentChoices);
+          }
+        }
+      });
+    } catch (error) {
+      console.warn('フォーム更新スキップ:', formId, error);
+    }
+  });
+}
+
+function removeClubFromForms(clubName) {
+  const scriptProperties = PropertiesService.getScriptProperties();
+  const formIds = [
+    scriptProperties.getProperty('ENTRY_FORM_ID'),
+    scriptProperties.getProperty('STAFF_FORM_ID'),
+    scriptProperties.getProperty('EXIT_FORM_ID')
+  ];
+  
+  formIds.forEach(formId => {
+    if (!formId) return;
+    
+    try {
+      const form = FormApp.openById(formId);
+      const items = form.getItems(FormApp.ItemType.LIST);
+      
+      items.forEach(item => {
+        if (item.getTitle().includes('団体')) {
+          const listItem = item.asListItem();
+          const currentChoices = listItem.getChoices()
+            .map(c => c.getValue())
+            .filter(c => c !== clubName);
+          
+          if (currentChoices.length > 0) {
+            listItem.setChoiceValues(currentChoices);
+          }
+        }
+      });
+    } catch (error) {
+      console.warn('フォーム更新スキップ:', formId, error);
+    }
+  });
+}
+
+// ============================================
+// 📊 スプレッドシート作成
+// ============================================
+
+function createAllClubSpreadsheets() {
+  const ui = SpreadsheetApp.getUi();
+  const clubs = getClubSettings();
+  
+  if (clubs.length === 0) {
+    ui.alert('エラー', '先に設定シートに団体一覧を入力してください。', ui.ButtonSet.OK);
+    return;
+  }
+  
+  const confirm = ui.alert(
+    '確認',
+    `${clubs.length}団体分のスプレッドシートを作成します。\n` +
+    `（各団体1ファイル × ${clubs.length}団体 = ${clubs.length}ファイル）\n\n` +
+    `続行しますか？`,
+    ui.ButtonSet.YES_NO
+  );
+  if (confirm !== ui.Button.YES) return;
+  
+  let successCount = 0;
+  let errorCount = 0;
+  
+  clubs.forEach(club => {
+    try {
+      if (club.ssId) {
+        console.log(`スキップ: ${club.name}（既にSS作成済み）`);
+        return;
+      }
+      
+      const ssId = createClubSpreadsheet(club.name, club.email);
+      saveClubSpreadsheetId(club.name, ssId);
+      successCount++;
+      console.log(`✅ ${club.name}: SS作成完了`);
+      
+    } catch (error) {
+      console.error(`❌ ${club.name}: SS作成エラー`, error);
+      errorCount++;
+    }
+  });
+  
+  ui.alert(
+    '作成完了',
+    `スプレッドシート作成が完了しました。\n\n` +
+    `成功: ${successCount}団体\n` +
+    `エラー: ${errorCount}団体`,
+    ui.ButtonSet.OK
+  );
+}
+
+function createClubSpreadsheet(clubName, clubEmail) {
+  // マスタースプレッドシートの親フォルダを取得
+  const masterSSId = SpreadsheetApp.getActiveSpreadsheet().getId();
+  const masterFile = DriveApp.getFileById(masterSSId);
+  const parentFolders = masterFile.getParents();
+  const targetFolder = parentFolders.hasNext() ? parentFolders.next() : DriveApp.getRootFolder();
+  
+  // 1つのスプレッドシートを作成
+  const ss = SpreadsheetApp.create(clubName);
+  const ssFile = DriveApp.getFileById(ss.getId());
+  
+  // フォルダに移動
+  targetFolder.addFile(ssFile);
+  DriveApp.getRootFolder().removeFile(ssFile);
+  
+  // シート1: 入部者
+  const entrySheet = ss.getSheetByName('シート1') || ss.getSheets()[0];
+  entrySheet.setName('入部者');
+  setupEntrySheet(entrySheet);
+  
+  // シート2: 幹部変更
+  const staffSheet = ss.insertSheet('幹部変更');
+  setupStaffSheet(staffSheet);
+  
+  // シート3: 退部者
+  const exitSheet = ss.insertSheet('退部者');
+  setupExitSheet(exitSheet);
+  
+  // 権限付与（編集権限）
+  ssFile.addEditor(clubEmail);
+  
+  // 入部者・幹部変更シートを保護（警告表示のみ）
+  protectSheet(entrySheet, clubEmail);
+  protectSheet(staffSheet, clubEmail);
+  
+  return ss.getId();
+}
+
+function protectSheet(sheet, clubEmail) {
+  const protection = sheet.protect();
+  protection.setDescription('管理者のみ編集可能');
+  protection.setWarningOnly(true); // 警告のみ表示（編集は可能だが警告が出る）
+}
+
+function setupEntrySheet(sheet) {
+  // 1行目: 空白（役職用）
+  sheet.getRange(1, 1).setValue('');
+  
+  // 2行目: ヘッダー
+  const headers = [
+    'タイムスタンプ', 'メールアドレス', '団体名', 'パスワード',
+    '学生番号', '氏名', '携帯電話番号',
+    '保護者-学生番号', '保護者-氏名', '学生証画像', 'OCR結果'
+  ];
+  sheet.getRange(2, 1, 1, headers.length).setValues([headers]);
+  sheet.getRange(2, 1, 1, headers.length)
+    .setBackground('#4285F4')
+    .setFontColor('#FFFFFF')
+    .setFontWeight('bold');
+  
+  // 列幅調整
+  sheet.setColumnWidth(1, 150);
+  sheet.setColumnWidth(2, 200);
+  sheet.setColumnWidth(6, 100);
+}
+
+function setupStaffSheet(sheet) {
+  // 1行目: 空白（役職用）
+  sheet.getRange(1, 1).setValue('');
+  
+  // 2行目: ヘッダー
+  const headers = [
+    'タイムスタンプ', 'メールアドレス', '団体名', 'パスワード',
+    '役職', '学生番号', '氏名', '携帯電話番号'
+  ];
+  sheet.getRange(2, 1, 1, headers.length).setValues([headers]);
+  sheet.getRange(2, 1, 1, headers.length)
+    .setBackground('#4285F4')
+    .setFontColor('#FFFFFF')
+    .setFontWeight('bold');
+}
+
+function setupExitSheet(sheet) {
+  // 1行目: 空白（役職用）
+  sheet.getRange(1, 1).setValue('');
+  
+  // 2行目: ヘッダー（A列にチェックボックス用）
+  const headers = [
+    '✓', 'タイムスタンプ', 'メールアドレス', '団体名', 'パスワード',
+    '学生番号', '氏名', '退部理由'
+  ];
+  sheet.getRange(2, 1, 1, headers.length).setValues([headers]);
+  sheet.getRange(2, 1, 1, headers.length)
+    .setBackground('#4285F4')
+    .setFontColor('#FFFFFF')
+    .setFontWeight('bold');
+  
+  // A列の幅を狭く
+  sheet.setColumnWidth(1, 30);
+}
+
+// ============================================
+// 📧 フォーム送信処理
+// ============================================
+
+function onEntryFormSubmit(e) {
+  processFormSubmit(e, 'entry');
+}
+
+function onStaffFormSubmit(e) {
+  processFormSubmit(e, 'staff');
+}
+
+function onExitFormSubmit(e) {
+  processFormSubmit(e, 'exit');
+}
+
+function processFormSubmit(e, formType) {
+  try {
+    console.log(`=== ${formType}フォーム送信処理開始 ===`);
+    
+    const response = e.values;
+    const email = response[CONFIG.FORM_EMAIL_COLUMN];
+    const clubName = response[CONFIG.FORM_CLUB_COLUMN];
+    
+    console.log('メール:', email);
+    console.log('団体名:', clubName);
+    
+    // 団体のスプレッドシートを取得
+    const clubSettings = getClubSettings().find(c => c.name === clubName);
+    if (!clubSettings) {
+      console.error('❌ 団体が見つかりません:', clubName);
+      return;
+    }
+    
+    if (!clubSettings.ssId) {
+      console.error('❌ スプレッドシートIDが設定されていません');
+      return;
+    }
+    
+    const ss = SpreadsheetApp.openById(clubSettings.ssId);
+    
+    // シート名を決定
+    let sheetName;
+    switch (formType) {
+      case 'entry':
+        sheetName = '入部者';
+        break;
+      case 'staff':
+        sheetName = '幹部変更';
+        break;
+      case 'exit':
+        sheetName = '退部者';
+        break;
+    }
+    
+    const sheet = ss.getSheetByName(sheetName);
+    if (!sheet) {
+      console.error('❌ シートが見つかりません:', sheetName);
+      return;
+    }
+    
+    // メールアドレスで既存データを検索
+    const emailColumn = formType === 'exit' ? 3 : 2; // 退部者はA列がチェックボックス
+    const existingRow = findRowByEmail(sheet, email, emailColumn);
+    
+    if (existingRow) {
+      // 上書き更新
+      if (formType === 'exit') {
+        // 退部者：チェックボックスは維持
+        sheet.getRange(existingRow, 2, 1, response.length).setValues([response]);
+      } else {
+        sheet.getRange(existingRow, 1, 1, response.length).setValues([response]);
+      }
+      console.log(`✅ 上書き更新: 行${existingRow}`);
+    } else {
+      // 新規追加（先頭に挿入 = 降順）
+      sheet.insertRowAfter(2);
+      
+      if (formType === 'exit') {
+        // 退部者：A列にチェックボックス
+        sheet.getRange(3, 1).insertCheckboxes();
+        sheet.getRange(3, 2, 1, response.length).setValues([response]);
+      } else {
+        sheet.getRange(3, 1, 1, response.length).setValues([response]);
+      }
+      console.log('✅ 新規追加: 行3');
+    }
+    
+    // OCR処理（入部者のみ）
+    if (formType === 'entry') {
+      processOCRForEntry(sheet, existingRow || 3, response);
+    }
+    
+    console.log(`=== ${formType}フォーム送信処理完了 ===`);
+    
+  } catch (error) {
+    console.error('❌ フォーム送信処理エラー:', error);
+  }
+}
+
+function findRowByEmail(sheet, email, emailColumn) {
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 3) return null; // ヘッダー行まで
+  
+  const data = sheet.getRange(3, emailColumn, lastRow - 2, 1).getValues();
+  
+  for (let i = 0; i < data.length; i++) {
+    if (data[i][0].toString().trim().toLowerCase() === email.toString().trim().toLowerCase()) {
+      return i + 3;
+    }
+  }
+  return null;
+}
+
+// ============================================
+// 🔍 OCR処理
+// ============================================
+
+function processOCRForEntry(sheet, rowNum, response) {
+  try {
+    const imageUrl = response[9]; // 学生証画像URL（調整必要）
+    if (!imageUrl) {
+      console.log('学生証画像なし - OCRスキップ');
+      return;
+    }
+    
+    // OCR処理（既存の関数を使用）
+    const ocrResult = processStudentCardWithRetry(imageUrl);
+    
+    if (ocrResult) {
+      sheet.getRange(rowNum, 11).setValue(ocrResult); // K列: OCR結果
+      
+      // 入力との整合性チェック
+      const inputStudentId = response[4]; // 学生番号
+      if (inputStudentId.toString().toUpperCase() !== ocrResult.toString().toUpperCase()) {
+        sheet.getRange(rowNum, 11).setFontColor('#FF0000');
+        console.log('⚠️ 学生番号不一致');
+      }
+    } else {
+      sheet.getRange(rowNum, 11).setValue('OCR失敗').setFontColor('#FF0000');
+    }
+    
+  } catch (error) {
+    console.error('OCR処理エラー:', error);
+    sheet.getRange(rowNum, 11).setValue('OCRエラー').setFontColor('#FF0000');
+  }
+}
+
+// ============================================
+// 🔑 パスワード管理
+// ============================================
+
+function changePasswordAndSendEmails() {
+  try {
+    console.log('=== パスワード変更処理開始 ===');
+    
+    const newPassword = generatePassword();
+    console.log('新パスワード:', newPassword);
+    
+    // 全フォームのパスワードを更新
+    updateAllFormsPassword(newPassword);
+    
+    // 全団体にメール送信
+    const clubs = getClubSettings();
+    let successCount = 0;
+    
+    clubs.forEach(club => {
+      try {
+        sendPasswordEmail(club, newPassword);
+        successCount++;
+        Utilities.sleep(1000);
+      } catch (error) {
+        console.error(`${club.name}へのメール送信エラー:`, error);
+      }
+    });
+    
+    // 管理者に通知
+    sendAdminNotification(newPassword, { success: successCount, failure: clubs.length - successCount });
+    
+    console.log('=== パスワード変更処理完了 ===');
+    
+  } catch (error) {
+    console.error('パスワード変更エラー:', error);
+    sendErrorNotification(error);
+  }
+}
+
+function generatePassword() {
+  const chars = 'ABCDEFGHJKLMNOPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789';
+  let password = '';
+  for (let i = 0; i < 5; i++) {
+    password += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return password;
+}
+
+function updateAllFormsPassword(newPassword) {
+  const scriptProperties = PropertiesService.getScriptProperties();
+  const formIds = [
+    scriptProperties.getProperty('ENTRY_FORM_ID'),
+    scriptProperties.getProperty('STAFF_FORM_ID'),
+    scriptProperties.getProperty('EXIT_FORM_ID')
+  ];
+  
+  formIds.forEach(formId => {
+    if (!formId) return;
+    updateFormPassword(formId, newPassword);
+  });
+}
+
+function updateFormPassword(formId, newPassword) {
+  try {
+    const form = FormApp.openById(formId);
+    const items = form.getItems(FormApp.ItemType.TEXT);
+    
+    for (const item of items) {
+      if (item.getTitle().includes('パスワード')) {
+        const textItem = item.asTextItem();
+        const validation = FormApp.createTextValidation()
+          .requireTextMatchesPattern(newPassword)
+          .setHelpText('パスワードが違います。正しいパスワードを入力してください。')
+          .build();
+        textItem.setValidation(validation);
+        console.log('パスワード更新:', formId);
+        return;
+      }
+    }
+  } catch (error) {
+    console.error('フォームパスワード更新エラー:', error);
+  }
+}
+
+function sendPasswordEmail(club, newPassword) {
+  const scriptProperties = PropertiesService.getScriptProperties();
+  const entryFormId = scriptProperties.getProperty('ENTRY_FORM_ID');
+  const staffFormId = scriptProperties.getProperty('STAFF_FORM_ID');
+  const exitFormId = scriptProperties.getProperty('EXIT_FORM_ID');
+  
+  const entryFormUrl = entryFormId ? FormApp.openById(entryFormId).getPublishedUrl() : '未設定';
+  const staffFormUrl = staffFormId ? FormApp.openById(staffFormId).getPublishedUrl() : '未設定';
+  const exitFormUrl = exitFormId ? FormApp.openById(exitFormId).getPublishedUrl() : '未設定';
+  
+  const subject = '【体育会本部】パスワード変更のお知らせ';
+  const body = `${club.name}御中
+
+お疲れ様です。
+千葉工業大学体育会本部編集部長です。
+
+表題の件について、パスワードが以下のとおり
+変更となったことご報告いたします。
+
+━━━━━━━━━━━━━━━━━━━━━━
+■ 新パスワード：${newPassword}
+━━━━━━━━━━━━━━━━━━━━━━
+
+■ 各種フォームリンク
+【入部届フォーム】
+${entryFormUrl}
+
+【幹部変更届フォーム】
+${staffFormUrl}
+
+【退部届フォーム】
+${exitFormUrl}
+
+■ 管理用スプレッドシート
+https://docs.google.com/spreadsheets/d/${club.ssId}
+※「入部者」「幹部変更」「退部者」の3シートがあります。
+※「退部者」シートのみ編集可能です。処理完了時にチェックを入れてください。
+
+何かご不明点等ございましたらご連絡ください。
+
+以上、よろしくお願いいたします。
+
+***********************************************
+千葉工業大学　体育会本部
+TEL：047-478-0251
+e-mail：cit.taiiku@gmail.com
+HP：https://sites.google.com/view/cittaiiku2021hp
+***********************************************`;
+  
+  MailApp.sendEmail(club.email, subject, body);
+  console.log('パスワードメール送信:', club.name);
+}
+
+function sendAdminNotification(newPassword, result) {
+  const subject = '【自動実行完了】パスワード変更処理';
+  const body = `パスワード変更処理が完了しました。
+
+実行日時: ${new Date().toLocaleString('ja-JP')}
+新パスワード: ${newPassword}
+
+メール送信結果:
+- 成功: ${result.success}件
+- 失敗: ${result.failure}件`;
+  
+  MailApp.sendEmail(CONFIG.ADMIN_EMAIL, subject, body);
+}
+
+function sendErrorNotification(error) {
+  const subject = '【エラー】パスワード変更処理';
+  const body = `パスワード変更処理でエラーが発生しました。
+
+実行日時: ${new Date().toLocaleString('ja-JP')}
+エラー内容: ${error.toString()}`;
+  
+  MailApp.sendEmail(CONFIG.ADMIN_EMAIL, subject, body);
+}
+
+function changePasswordManually() {
+  const ui = SpreadsheetApp.getUi();
+  const confirm = ui.alert(
+    'パスワード変更',
+    'パスワードを変更し、全団体にメール送信しますか？',
+    ui.ButtonSet.YES_NO
+  );
+  
+  if (confirm === ui.Button.YES) {
+    changePasswordAndSendEmails();
+    ui.alert('完了', 'パスワード変更とメール送信が完了しました。', ui.ButtonSet.OK);
+  }
+}
+
+// ============================================
+// ⏰ トリガー設定
+// ============================================
+
+function setupTriggers() {
+  const ui = SpreadsheetApp.getUi();
+  
+  try {
+    // 既存トリガー削除
+    ScriptApp.getProjectTriggers().forEach(trigger => {
+      ScriptApp.deleteTrigger(trigger);
+    });
+    
+    // フォーム送信トリガー
+    const scriptProperties = PropertiesService.getScriptProperties();
+    const entryFormId = scriptProperties.getProperty('ENTRY_FORM_ID');
+    const staffFormId = scriptProperties.getProperty('STAFF_FORM_ID');
+    const exitFormId = scriptProperties.getProperty('EXIT_FORM_ID');
+    
+    if (entryFormId) {
+      ScriptApp.newTrigger('onEntryFormSubmit')
+        .forForm(entryFormId)
+        .onFormSubmit()
+        .create();
+      console.log('✅ 入部届トリガー作成');
+    }
+    
+    if (staffFormId) {
+      ScriptApp.newTrigger('onStaffFormSubmit')
+        .forForm(staffFormId)
+        .onFormSubmit()
+        .create();
+      console.log('✅ 幹部変更届トリガー作成');
+    }
+    
+    if (exitFormId) {
+      ScriptApp.newTrigger('onExitFormSubmit')
+        .forForm(exitFormId)
+        .onFormSubmit()
+        .create();
+      console.log('✅ 退部届トリガー作成');
+    }
+    
+    // 月次パスワード変更トリガー
+    ScriptApp.newTrigger('changePasswordAndSendEmails')
+      .timeBased()
+      .onMonthDay(1)
+      .atHour(9)
+      .create();
+    console.log('✅ 月次パスワード変更トリガー作成');
+    
+    // 定期クリーンアップトリガー（廃止 or 維持）
+    // ※通知問題を避けるため、必要に応じてコメントアウト
+    /*
+    ScriptApp.newTrigger('cleanupTempFolder')
+      .timeBased()
+      .everyDays(1)
+      .atHour(2)
+      .create();
+    */
+    
+    ui.alert('✅ トリガー設定完了', 'トリガーを設定しました。', ui.ButtonSet.OK);
+    
+  } catch (error) {
+    console.error('トリガー設定エラー:', error);
+    ui.alert('エラー', 'トリガー設定中にエラーが発生しました:\n' + error.toString(), ui.ButtonSet.OK);
+  }
+}
+
+// ============================================
+// 🧹 クリーンアップ
+// ============================================
+
+function cleanupTempFolder() {
+  try {
+    const folderName = 'OCR_Temp_' + new Date().getFullYear();
+    const folders = DriveApp.getFoldersByName(folderName);
+    
+    if (!folders.hasNext()) {
+      console.log('クリーンアップ対象なし');
+      return;
+    }
+    
+    const folder = folders.next();
+    const files = folder.getFiles();
+    let deletedCount = 0;
+    
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    
+    while (files.hasNext()) {
+      const file = files.next();
+      if (file.getDateCreated() < oneHourAgo) {
+        file.setTrashed(true);
+        deletedCount++;
+      }
+    }
+    
+    console.log(`✅ クリーンアップ完了: ${deletedCount}ファイル削除`);
+    
+  } catch (error) {
+    console.error('クリーンアップエラー:', error);
+  }
+}
+
+// ============================================
+// 🔍 OCR関連（既存コードから移植）
+// ============================================
+
+function processStudentCardWithRetry(imageUrl, maxRetries = 2) {
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const result = processStudentCardDriveOCR(imageUrl);
+      if (result) return result;
+      Utilities.sleep(3000);
+    } catch (error) {
+      console.error(`OCR試行 ${attempt}/${maxRetries} エラー:`, error);
+      if (attempt < maxRetries) Utilities.sleep(3000);
+    }
+  }
+  return null;
+}
+
+function processStudentCardDriveOCR(imageUrl) {
+  try {
+    const fileId = extractFileIdFromUrl(imageUrl);
+    if (!fileId) return null;
+    
+    const file = DriveApp.getFileById(fileId);
+    const blob = file.getBlob();
+    
+    const tempFolder = getOrCreateTempFolder();
+    const resource = {
+      title: `OCR_${Date.now()}`,
+      parents: [{ id: tempFolder.getId() }],
+    };
+    
+    const doc = Drive.Files.insert(resource, blob, { ocr: true, ocrLanguage: 'ja' });
+    if (!doc || !doc.id) return null;
+    
+    Utilities.sleep(3000);
+    
+    const ocrDoc = DocumentApp.openById(doc.id);
+    const ocrText = ocrDoc.getBody().getText();
+    
+    DriveApp.getFileById(doc.id).setTrashed(true);
+    
+    return extractStudentId(ocrText);
+    
+  } catch (error) {
+    console.error('OCRエラー:', error);
+    return null;
+  }
+}
+
+function extractStudentId(text) {
+  // 学生番号パターン（例: 24A2095）
+  const patterns = [
+    /(\d{2}[A-Za-z]\d{4})/g,
+    /(\d{7})/g
+  ];
+  
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) return match[0].toUpperCase();
+  }
+  return null;
+}
+
+function extractFileIdFromUrl(url) {
+  if (!url) return null;
+  const patterns = [
+    /\/file\/d\/([a-zA-Z0-9-_]+)/,
+    /id=([a-zA-Z0-9-_]+)/,
+    /\/d\/([a-zA-Z0-9-_]+)/
+  ];
+  for (const pattern of patterns) {
+    const match = url.match(pattern);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+function getOrCreateTempFolder() {
+  const folderName = 'OCR_Temp_' + new Date().getFullYear();
+  const folders = DriveApp.getFoldersByName(folderName);
+  if (folders.hasNext()) return folders.next();
+  return DriveApp.createFolder(folderName);
+}
+
+// ============================================
+// 📧 手動処理
+// ============================================
+
+function processSelectedRow() {
+  const ui = SpreadsheetApp.getUi();
+  ui.alert('情報', 'この機能は団体別SSで使用してください。', ui.ButtonSet.OK);
+}
+
+function sendEmailForSelectedRow() {
+  const ui = SpreadsheetApp.getUi();
+  ui.alert('情報', 'メール送信機能は廃止されました。', ui.ButtonSet.OK);
+}
+
+function updateClubInfo() {
+  const ui = SpreadsheetApp.getUi();
+  ui.alert('情報', '設定シートを直接編集してください。', ui.ButtonSet.OK);
+}
